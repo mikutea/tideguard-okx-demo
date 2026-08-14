@@ -1,0 +1,132 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Validate release tag
+        id: release
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+            throw "Release tags must look like v1.2.3"
+          }
+          "version=$($Matches.version)" >> $env:GITHUB_OUTPUT
+
+      - name: Enable Corepack
+        shell: pwsh
+        run: corepack enable
+
+      - name: Install verified Inno Setup
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "innosetup-6.7.1.exe"
+          $installDir = Join-Path $env:RUNNER_TEMP "Inno Setup 6"
+          Invoke-WebRequest `
+            -Uri "https://github.com/jrsoftware/issrc/releases/download/is-6_7_1/innosetup-6.7.1.exe" `
+            -OutFile $installer
+          $expected = "4d11e8050b6185e0d49bd9e8cc661a7a59f44959a621d31d11033124c4e8a7b0"
+          $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -cne $expected) { throw "Inno Setup SHA-256 mismatch" }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+              $null -eq $signature.SignerCertificate -or
+              $signature.SignerCertificate.Subject -notmatch '(^|, )O=Pyrsys B\.V\.(,|$)') {
+            throw "Inno Setup installer signature is not valid or has an unexpected publisher"
+          }
+          $arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=`"$installDir`""
+          $process = Start-Process -FilePath $installer -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed" }
+          $compiler = Join-Path $installDir "ISCC.exe"
+          if (-not (Test-Path -LiteralPath $compiler)) { throw "ISCC.exe was not installed" }
+          $installDir >> $env:GITHUB_PATH
+
+      - name: Build and verify Windows artifacts
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: >-
+          .\packaging\build-release.ps1
+          -Version $env:RELEASE_VERSION
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Tideguard-${{ steps.release.outputs.version }}-windows-x64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: Tideguard-${{ needs.build.outputs.version }}-windows-x64
+          path: release
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $object = (& gh api "repos/$env:GH_REPO/git/ref/tags/$tag" | ConvertFrom-Json).object
+          if ($LASTEXITCODE -ne 0) { throw "Unable to resolve release tag" }
+          for ($depth = 0; $object.type -eq "tag" -and $depth -lt 5; $depth++) {
+            $object = (& gh api "repos/$env:GH_REPO/git/tags/$($object.sha)" | ConvertFrom-Json).object
+            if ($LASTEXITCODE -ne 0) { throw "Unable to peel annotated release tag" }
+          }
+          if ($object.type -ne "commit" -or $object.sha -cne $env:EXPECTED_SHA) {
+            throw "Release tag no longer points to the commit that produced these artifacts"
+          }
+          $assets = Get-ChildItem -LiteralPath release -File | ForEach-Object FullName
+          & gh release view $tag --json id *> $null
+          if ($LASTEXITCODE -eq 0) {
+            & gh release upload $tag @assets --clobber
+          } else {
+            & gh release create $tag @assets --verify-tag --generate-notes --title "Tideguard $tag"
+          }
+          if ($LASTEXITCODE -ne 0) { throw "GitHub Release publication failed" }

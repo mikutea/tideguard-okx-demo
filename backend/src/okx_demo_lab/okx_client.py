@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import httpx
 
 from .config import (
+    ALLOWED_INSTRUMENTS,
     ALLOWED_PRIVATE_ENDPOINTS,
     ALLOWED_PUBLIC_ENDPOINTS,
     OKX_BASE_URL,
@@ -139,7 +140,9 @@ class OkxClient:
         )
         response.raise_for_status()
         return self._validate_envelope(
-            response.json(), allow_candle_rows=path == "/api/v5/market/candles"
+            response.json(),
+            allow_candle_rows=path
+            in {"/api/v5/market/candles", "/api/v5/market/history-candles"},
         )
 
     async def private_request(
@@ -254,6 +257,48 @@ class OkxClient:
         if instrument.get("instType") != "SPOT" or instrument.get("instId") != inst_id:
             raise OkxClientError("交易品种未被 OKX 确认为 SPOT")
         return {"ticker": ticker[0], "candles": candles, "instrument": instrument}
+
+    async def get_history_candles(
+        self,
+        inst_id: str = "BTC-USDT",
+        *,
+        bar: str = "5m",
+        limit: int = 2_000,
+    ) -> list[list[Any]]:
+        if inst_id not in ALLOWED_INSTRUMENTS or bar != "5m":
+            raise OkxClientError("模型训练只允许 BTC-USDT 的 5m 公共 K 线")
+        if not 300 <= limit <= 5_000:
+            raise OkxClientError("模型训练 K 线数量必须在 300–5000 之间")
+
+        rows_by_timestamp: dict[int, list[Any]] = {}
+        after: str | None = None
+        while len(rows_by_timestamp) < limit:
+            page_size = min(300, limit - len(rows_by_timestamp))
+            params = {"instId": inst_id, "bar": bar, "limit": str(page_size)}
+            if after:
+                params["after"] = after
+            page = await self.public_get("/api/v5/market/history-candles", params)
+            if not page:
+                break
+
+            timestamps: list[int] = []
+            for row in page:
+                timestamp_text = str(row[0]).strip()
+                if not timestamp_text.isdigit():
+                    raise OkxClientError("OKX 历史 K 线包含无效时间戳")
+                timestamp = int(timestamp_text)
+                timestamps.append(timestamp)
+                if str(row[8]) == "1":
+                    rows_by_timestamp[timestamp] = row
+
+            next_after = str(min(timestamps))
+            if next_after == after:
+                raise OkxClientError("OKX 历史 K 线分页游标未前进")
+            after = next_after
+            if len(page) < page_size:
+                break
+
+        return [rows_by_timestamp[key] for key in sorted(rows_by_timestamp)][-limit:]
 
     async def get_account_balance(
         self, *, expected_credential_fingerprint: str | None = None

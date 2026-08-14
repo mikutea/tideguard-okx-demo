@@ -40,6 +40,26 @@ class CommitRequest(StrictModel):
     digest: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
+class ModelTrainRequest(StrictModel):
+    candleLimit: int = Field(default=2_000, ge=1_600, le=5_000)
+
+
+class ModelPromoteRequest(StrictModel):
+    modelId: str = Field(pattern=r"^mdl_[0-9a-f]{24}$")
+    reviewer: str = Field(min_length=1, max_length=128)
+    rationale: str = Field(min_length=16, max_length=2_000)
+    confirmation: str = Field(min_length=1, max_length=64)
+    expectedGeneration: int = Field(ge=0)
+
+
+class AutomationAuthorizeRequest(StrictModel):
+    issuedBy: str = Field(min_length=1, max_length=128)
+    confirmation: str = Field(min_length=1, max_length=64)
+    ttlSeconds: int = Field(default=300, ge=30, le=600)
+    maxOrders: int = Field(default=1, ge=1, le=1)
+    maxTotalNotionalUsdt: Decimal = Field(default=Decimal("10"), gt=0, le=10)
+
+
 class RiskCheck(BaseModel):
     key: str
     label: str

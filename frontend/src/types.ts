@@ -128,3 +128,83 @@ export interface PreviewResult {
     reasonCodes: string[];
   };
 }
+
+export interface MLModelSummary {
+  modelId: string;
+  artifactSha256: string;
+  state: "candidate" | "validated" | "champion" | "retired" | "rejected";
+  trainer: string;
+  createdAt: string;
+  trainedThrough: string;
+  validationRunId: string | null;
+  reportSha256: string | null;
+  metrics: null | {
+    folds: number;
+    oosRows: number;
+    trades: number;
+    accuracy: number;
+    netReturn: number;
+    maxDrawdown: number;
+    worstFoldNetReturn: number;
+    roundTripCostBps: number;
+    evaluationMode: string;
+  };
+  gateFailures: string[];
+}
+
+export interface MLStatus {
+  engine: {
+    name: string;
+    artifactFormat: string;
+    featureContractSha256: string;
+    trainingMode: string;
+    profitGuarantee: boolean;
+  };
+  training: { running: boolean; publicDataOnly: boolean };
+  models: MLModelSummary[];
+  champion: null | {
+    modelId: string;
+    artifactSha256: string;
+    generation: number;
+    promotionId: string;
+    reviewer: string;
+    rationale: string;
+    policySha256: string;
+    validationRunId: string;
+    reportSha256: string;
+    approvedAt: string;
+  };
+  generation: number;
+  promotionPolicy: Record<string, string | number> & { confirmation: string };
+  automation: {
+    confirmation: string;
+    demoOnly: boolean;
+    instrument: string;
+    maxSessionSeconds: number;
+    maxSessionOrders: number;
+    maxSessionNotionalUsdt: string;
+    entryOnly: boolean;
+    automaticExit: boolean;
+    permit: null | {
+      permitId: string;
+      modelId: string;
+      expiresAt: string;
+      maxOrders: number;
+      maxTotalNotionalUsdt: string;
+      usedOrders: number;
+      usedNotionalUsdt: string;
+      revokedAt: string | null;
+      active: boolean;
+      remainingSeconds: number;
+    };
+    manualReviews: Array<Record<string, string | null>>;
+    recentExecutions: Array<Record<string, unknown>>;
+    lastDecision: null | Record<string, unknown>;
+  };
+  freqai: {
+    bundled: boolean;
+    mode: string;
+    directOkxDemoExecution: boolean;
+    pinnedReferenceVersion: string;
+  };
+}

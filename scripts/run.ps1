@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectRoot '.venv\Scripts\python.exe'
 $frontendPath = Join-Path $projectRoot 'frontend'
+$env:TIDEGUARD_DATA_DIR = Join-Path $projectRoot '.local-data'
 
 function Assert-NativeSuccess([string]$Step) {
     if ($LASTEXITCODE -ne 0) { throw "$Step 失败，退出码 $LASTEXITCODE" }

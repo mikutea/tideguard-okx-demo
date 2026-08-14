@@ -19,7 +19,7 @@
 - 只允许现货 cash，且代码中不存在实盘切换；
 - 两阶段确认、确定性风控、超时对账和哈希审计。
 
-因此潮汐台当前只实现 OKX Demo 执行与风控窄边界，不重写模型训练框架。下面的冻结模型建议意图是后续接口设计，当前代码尚未实现 FreqAI/策略意图适配器。
+因此潮汐台不整体复制这些机器人。当前实现一个可审计的原生线性基线，用真实 OKX 公共 K 线训练、时间隔离验证并产出冻结建议意图；唯一执行入口仍是原有 OKX Demo 风控链。FreqAI 只保留“独立 dry-run 进程 → localhost 冻结信号”的可选边界，不随安装器捆绑。
 
 ## 候选
 
@@ -34,23 +34,23 @@
 | [Microsoft Qlib](https://github.com/microsoft/qlib) | 因子、监督学习、RL、研究流水线 | 主要是研究平台，不是即装即用的 OKX 自动机器人 | 后续离线研究候选 |
 | [FinRL / FinRL-X](https://github.com/AI4Finance-Foundation/FinRL-Trading) | DRL/ML 研究与组合权重 | 当前生产示例面向股票/Alpaca，不是 OKX Crypto Demo | 不用于当前执行层 |
 
-## AI 接入边界（设计稿，尚未实现）
+## 已实现的模型建议意图边界
 
-未来接入时，外部引擎只能提交以下“建议意图”：
+原生冻结模型只会在内部生成与以下语义等价的建议意图：
 
 ```json
 {
   "modelVersion": "frozen-model-sha256",
   "observedAt": "UTC timestamp",
   "instrument": "BTC-USDT",
-  "side": "buy or sell",
+  "side": "buy",
   "limitPrice": "decimal string",
   "size": "decimal string",
   "evidenceHash": "sha256"
 }
 ```
 
-建议意图不能自行下单。它仍需经过潮汐台的行情新鲜度、精度、价格偏离、余额、单笔限额、挂单数量、人工启用状态和一次性确认。
+建议意图不能自行下单。v0.2 只允许一次最多 10 USDT 的 Demo BUY 入场，SELL 在建议层和执行层均拒绝，且没有自动退出；成交后的退出需人工处理。该意图仍需经过潮汐台的行情新鲜度、精度、价格偏离、余额、单笔限额、挂单数量、人工启用状态、短时 permit 和原有提交前急停门。未知提交状态进入人工核对且禁止自动重试。
 
 ## 明确排除
 

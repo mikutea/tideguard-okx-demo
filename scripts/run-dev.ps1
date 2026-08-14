@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$env:TIDEGUARD_DATA_DIR = Join-Path $projectRoot '.local-data'
 if (-not (Test-Path -LiteralPath $pythonPath)) {
     throw '尚未安装。请先运行 .\scripts\setup.ps1'
 }

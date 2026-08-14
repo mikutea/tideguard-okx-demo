@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "okx-demo-lab"
-version = "0.1.0"
+version = "0.2.0"
 description = "Demo-only local OKX spot research terminal"
 requires-python = ">=3.11"
 dependencies = [
@@ -18,6 +18,10 @@ dependencies = [
 dev = [
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",
+]
+desktop = [
+  "pyinstaller==6.21.0; sys_platform == 'win32'",
+  "pywebview==6.2.1; sys_platform == 'win32'",
 ]
 
 [tool.hatch.build.targets.wheel]

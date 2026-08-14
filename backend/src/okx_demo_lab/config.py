@@ -28,15 +28,20 @@ ALLOWED_PUBLIC_ENDPOINTS = frozenset(
         "/api/v5/public/instruments",
         "/api/v5/market/ticker",
         "/api/v5/market/candles",
+        "/api/v5/market/history-candles",
     }
 )
 
 
 def app_data_dir() -> Path:
-    root = os.environ.get("LOCALAPPDATA")
-    if not root:
-        root = str(Path.home() / "AppData" / "Local")
-    path = Path(root) / APP_NAME
+    override = os.environ.get("TIDEGUARD_DATA_DIR", "").strip()
+    if override:
+        path = Path(override).expanduser()
+    else:
+        root = os.environ.get("LOCALAPPDATA")
+        if not root:
+            root = str(Path.home() / "AppData" / "Local")
+        path = Path(root) / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
 

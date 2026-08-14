@@ -13,7 +13,19 @@ from fastapi.staticfiles import StaticFiles
 
 from .audit import AuditStore
 from .config import APP_NAME, OKX_BASE_URL, POLICY, SIMULATED_HEADER, app_data_dir
-from .models import ArmRequest, CommitRequest, OrderDraft, ResetKillRequest
+from .ml.execution import AutomationDenied
+from .ml.pipeline import DatasetError
+from .ml.registry import PromotionDenied, RegistryError
+from .ml.runtime import MLCoordinator, MLRuntimeError
+from .models import (
+    ArmRequest,
+    AutomationAuthorizeRequest,
+    CommitRequest,
+    ModelPromoteRequest,
+    ModelTrainRequest,
+    OrderDraft,
+    ResetKillRequest,
+)
 from .okx_client import OkxClient, OkxClientError
 from .secrets import credentials_configured
 from .service import TradingService
@@ -57,8 +69,11 @@ async def lifespan(app: FastAPI):
     app.state.client = client
     app.state.safety = safety
     app.state.service = service
+    ml = MLCoordinator(data_dir=data_dir, client=client, service=service, store=store)
+    app.state.ml = ml
     app.state.csrf_token = token_secrets.token_urlsafe(32)
     app.state.deadman_task = None
+    app.state.ml_task = None
     store.append(
         "system.started",
         {"environment": "demo", "bind": "127.0.0.1", "armed": False},
@@ -85,9 +100,18 @@ async def lifespan(app: FastAPI):
                     pass
 
     app.state.deadman_task = asyncio.create_task(deadman_loop())
+    app.state.ml_task = asyncio.create_task(ml.run())
     try:
         yield
     finally:
+        ml_task = app.state.ml_task
+        if ml_task:
+            ml_task.cancel()
+            try:
+                await ml_task
+            except asyncio.CancelledError:
+                pass
+        await ml.close()
         task = app.state.deadman_task
         if task:
             task.cancel()
@@ -101,7 +125,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Tideguard OKX Demo API",
-    version="0.1.0",
+    version="0.2.0",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -138,7 +162,7 @@ def service(request: Request) -> TradingService:
 async def system_status(request: Request) -> dict[str, Any]:
     return {
         "app": APP_NAME,
-        "version": "0.1.0",
+        "version": "0.2.0",
         "environment": "OKX 模拟盘",
         "demoHeader": SIMULATED_HEADER,
         "baseUrl": OKX_BASE_URL,
@@ -254,6 +278,62 @@ async def commit(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except OkxClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/ml/status")
+async def ml_status(request: Request) -> dict[str, Any]:
+    try:
+        return request.app.state.ml.status()
+    except (RegistryError, AutomationDenied, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/ml/train")
+async def ml_train(request: Request, body: ModelTrainRequest) -> dict[str, Any]:
+    try:
+        return await request.app.state.ml.train_candidate(body.candleLimit)
+    except (MLRuntimeError, DatasetError, RegistryError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OkxClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/ml/promote")
+async def ml_promote(request: Request, body: ModelPromoteRequest) -> dict[str, Any]:
+    try:
+        return await request.app.state.ml.promote(
+            body.modelId,
+            reviewer=body.reviewer,
+            rationale=body.rationale,
+            confirmation=body.confirmation,
+            expected_generation=body.expectedGeneration,
+        )
+    except (PromotionDenied, RegistryError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/ml/automation/authorize")
+async def ml_automation_authorize(
+    request: Request, body: AutomationAuthorizeRequest
+) -> dict[str, Any]:
+    try:
+        return await request.app.state.ml.authorize(
+            issued_by=body.issuedBy,
+            confirmation=body.confirmation,
+            ttl_seconds=body.ttlSeconds,
+            max_orders=body.maxOrders,
+            max_total_notional_usdt=body.maxTotalNotionalUsdt,
+        )
+    except (AutomationDenied, RegistryError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/ml/automation/stop")
+async def ml_automation_stop(request: Request) -> dict[str, Any]:
+    try:
+        return await request.app.state.ml.stop_automation()
+    except (AutomationDenied, RegistryError, ValueError, OkxClientError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/healthz")

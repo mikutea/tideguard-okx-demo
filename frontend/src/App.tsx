@@ -2,6 +2,7 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  Bot,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -14,6 +15,7 @@ import {
   LayoutDashboard,
   ListOrdered,
   LockKeyhole,
+  Play,
   RefreshCw,
   ScrollText,
   Settings,
@@ -29,6 +31,7 @@ import type {
   AuditEvent,
   DemoOrder,
   MarketData,
+  MLStatus,
   PreviewResult,
   RiskCheck,
   SystemStatus
@@ -633,13 +636,129 @@ function SettingsView({ status, onError }: { status: SystemStatus | null; onErro
   );
 }
 
-function StrategyLab() {
+const gateLabels: Record<string, string> = {
+  unsupported_evaluation_semantics: "旧版 long/short 重叠验证不可晋级",
+  insufficient_folds: "Walk-forward 折数不足",
+  insufficient_oos_rows: "样本外行数不足",
+  insufficient_trades: "样本外信号数不足",
+  cost_assumption_too_low: "成本假设过低",
+  aggregate_accuracy_below_gate: "long / flat 决策准确率未过门",
+  aggregate_net_return_below_gate: "固定周期 OOS 诊断净值未过门",
+  worst_fold_below_gate: "最差固定周期 OOS 窗口未过门",
+  drawdown_above_gate: "最大回撤超限",
+  validation_missing: "缺少绑定验证"
+};
+
+function percent(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  return `${(value * 100).toFixed(2)}%`;
+}
+
+function StrategyLab({ status, onRefresh, onError }: { status: SystemStatus | null; onRefresh: () => Promise<void>; onError: (message: string) => void }) {
+  const [ml, setML] = useState<MLStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [reviewer, setReviewer] = useState("local-user");
+  const [rationale, setRationale] = useState("");
+  const [promotionPhrase, setPromotionPhrase] = useState("");
+  const [automationPhrase, setAutomationPhrase] = useState("");
+
+  const refreshML = useCallback(async () => {
+    try {
+      const next = await api.getMLStatus();
+      setML(next);
+      if (!selectedModel) {
+        const ready = next.models.find((model) => model.state === "validated" && model.gateFailures.length === 0);
+        if (ready) setSelectedModel(ready.modelId);
+      }
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "模型状态读取失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [onError, selectedModel]);
+
+  useEffect(() => {
+    void refreshML();
+    const interval = window.setInterval(() => void refreshML(), 5_000);
+    return () => window.clearInterval(interval);
+  }, [refreshML]);
+
+  const run = async (name: string, action: () => Promise<unknown>, success?: string) => {
+    setBusy(name);
+    try {
+      await action();
+      if (success) onError(success);
+      await Promise.all([refreshML(), onRefresh()]);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "操作失败");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const selected = ml?.models.find((model) => model.modelId === selectedModel) ?? null;
+  const activePermit = ml?.automation.permit?.active ? ml.automation.permit : null;
+  const canPromote = Boolean(selected && selected.state === "validated" && selected.gateFailures.length === 0);
+  const canAuthorize = Boolean(ml?.champion && status?.credentialConfigured && status.safety.mode === "armed");
+
   return (
-    <main className="page-view">
-      <div className="page-title"><div><p>离线研究</p><h1>策略实验室</h1></div></div>
-      <section className="lab-hero surface"><FlaskConical size={30} /><div><h2>先冻结策略，再进入模拟盘</h2><p>当前版本不会在线自改代码、参数、风险阈值、交易品种或资金规模。候选策略只生成建议意图，必须经过时间隔离验证、人工晋级和同一套确定性风控。</p></div></section>
-      <div className="lab-flow"><div><span>01</span><strong>离线数据</strong><p>保存数据时间与来源，不允许前视。</p></div><ChevronRight /><div><span>02</span><strong>Walk-forward</strong><p>计入手续费、滑点、延迟与拒单。</p></div><ChevronRight /><div><span>03</span><strong>Shadow</strong><p>只产生信号，不发送任何订单。</p></div><ChevronRight /><div><span>04</span><strong>人工晋级</strong><p>版本、哈希、风控全部复核后启用。</p></div></div>
-      <section className="surface empty-lab"><LockKeyhole size={24} /><div><h3>当前版本未集成自动学习或策略引擎</h3><p>首版提供连接、风控、幂等和审计底座；冻结模型建议意图适配器仍待实现。</p></div></section>
+    <main className="page-view lab-page">
+      <div className="page-title"><div><p>离线训练 · 人工晋级 · Demo 执行</p><h1>策略实验室</h1></div><button className="button secondary" disabled={loading || Boolean(busy)} onClick={() => void refreshML()}><RefreshCw size={15} />刷新</button></div>
+      <section className="lab-hero surface"><Bot size={32} /><div><h2>模型已经接入，但没有收益承诺</h2><p>本机用 OKX 公共、已完成的 BTC-USDT 5 分钟 K 线训练数据模型；时间隔离验证通过后仍需你逐字确认人工晋级。固定周期 long-only OOS 只是研究诊断，不代表部署后收益。v0.2 自动路径只允许一笔 10 USDT Demo BUY 入场，不会自动卖出，退出必须人工处理。</p></div><div className="lab-engine"><span>{ml?.engine.name ?? "加载中"}</span><small>严格 JSON · long-only 研究诊断</small></div></section>
+      <div className="lab-flow"><div><span>01</span><strong>公共历史 K 线</strong><p>只读、已确认、5m 连续时间轴。</p></div><ChevronRight /><div><span>02</span><strong>Long-only OOS</strong><p>固定 12 根持有、非重叠资本、计入双边 12 bps。</p></div><ChevronRight /><div><span>03</span><strong>人工 champion</strong><p>门槛、哈希与代次 CAS 全部复核。</p></div><ChevronRight /><div><span>04</span><strong>单次 Demo 入场</strong><p>≤10 分钟、仅 1 笔 BUY、10 USDT。</p></div></div>
+
+      <section className="lab-grid">
+        <article className="surface lab-card lab-train-card">
+          <div className="lab-card-head"><div><span className="eyebrow">离线训练</span><h2>创建候选模型</h2></div><FlaskConical size={22} /></div>
+          <p>下载最近 2,000 根公共已完成 K 线，在本机训练。训练不会读取凭证、不会晋级、不会触发下单。</p>
+          <div className="lab-facts"><span>约 7 天数据</span><span>12 根预测窗</span><span>固定 seed</span></div>
+          <button className="button primary" disabled={Boolean(busy) || ml?.training.running} onClick={() => void run("train", () => api.trainModel(2000), "候选训练完成，请审阅样本外指标")}>{busy === "train" || ml?.training.running ? <><RefreshCw className="spin" size={15} />训练中…</> : <><Play size={15} />训练新候选</>}</button>
+        </article>
+
+        <article className="surface lab-card">
+          <div className="lab-card-head"><div><span className="eyebrow">当前 champion</span><h2>{ml?.champion?.modelId ?? "尚未晋级"}</h2></div><ShieldCheck size={22} /></div>
+          {ml?.champion ? <><p>第 {ml.champion.generation} 代，由 {ml.champion.reviewer} 于 {formatTime(ml.champion.approvedAt)} 人工晋级。</p><code className="hash-line">{ml.champion.artifactSha256}</code></> : <p>候选不会自动成为 champion。只有全部验证门通过并提供人工说明后才能晋级。</p>}
+          <div className="lab-facts"><span>代次 {ml?.generation ?? 0}</span><span>自动执行默认关闭</span><span>仅 OKX Demo</span></div>
+        </article>
+      </section>
+
+      <section className="surface model-section">
+        <div className="section-heading"><div><span className="eyebrow">候选与验证</span><h2>固定周期 long-only OOS 诊断</h2></div><span className="count-pill">{ml?.models.length ?? 0} 个模型</span></div>
+        {!ml || ml.models.length === 0 ? <div className="empty-lab"><LockKeyhole size={24} /><div><h3>还没有候选模型</h3><p>先运行一次公共数据训练，再根据每个时间窗的结果决定是否保留。</p></div></div> : <div className="model-list">{ml.models.map((model) => {
+          const metrics = model.metrics;
+          const isLongOnlyDiagnostic = metrics?.evaluationMode === "long-only-fixed-horizon-non-overlapping";
+          const ready = model.state === "validated" && model.gateFailures.length === 0;
+          return <article className={`model-row ${selectedModel === model.modelId ? "selected" : ""}`} key={model.modelId}>
+            <div className="model-identity"><div><span className={`model-state ${ready ? "ready" : model.state}`}>{ready ? "可供人工晋级" : model.state}</span><strong>{model.modelId}</strong></div><time>{formatTime(model.createdAt)}</time></div>
+            <div className="metric-grid"><div><span>OOS 窗口行</span><strong>{metrics?.oosRows ?? "—"}</strong></div><div><span>折数</span><strong>{metrics?.folds ?? "—"}</strong></div><div><span>{isLongOnlyDiagnostic ? "非重叠 long 入场" : "旧版方向交易（仅审计）"}</span><strong>{metrics?.trades ?? "—"}</strong></div><div><span>{isLongOnlyDiagnostic ? "long / flat 准确率" : "旧版方向准确率（仅审计）"}</span><strong>{percent(metrics?.accuracy)}</strong></div><div><span>{isLongOnlyDiagnostic ? "固定周期诊断净值" : "旧版重叠诊断净值（禁晋级）"}</span><strong className={(metrics?.netReturn ?? -1) >= 0 ? "positive" : "negative"}>{percent(metrics?.netReturn)}</strong></div><div><span>{isLongOnlyDiagnostic ? "诊断最大回撤" : "旧版诊断回撤（仅审计）"}</span><strong>{percent(metrics?.maxDrawdown)}</strong></div></div>
+            <div className="gate-row">{!isLongOnlyDiagnostic ? <span className="gate-fail">旧版 long/short 重叠验证仅供审计，禁止晋级</span> : model.gateFailures.length === 0 ? <span className="gate-ok"><CheckCircle2 size={14} />全部晋级门通过</span> : model.gateFailures.map((failure) => <span className="gate-fail" key={failure}>{gateLabels[failure] ?? failure}</span>)}</div>
+            <button className="button secondary" disabled={model.state !== "validated"} onClick={() => setSelectedModel(model.modelId)}>{selectedModel === model.modelId ? "已选择" : "选择审阅"}</button>
+          </article>;
+        })}</div>}
+      </section>
+
+      <section className="lab-grid">
+        <article className="surface lab-card lab-form-card">
+          <div className="lab-card-head"><div><span className="eyebrow">人工晋级</span><h2>冻结为 champion</h2></div><CheckCircle2 size={22} /></div>
+          <label>候选模型<input value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} placeholder="从上方选择可晋级候选" /></label>
+          <label>审阅人<input value={reviewer} onChange={(event) => setReviewer(event.target.value)} maxLength={128} /></label>
+          <label>审阅说明<textarea value={rationale} onChange={(event) => setRationale(event.target.value)} placeholder="至少 16 个字符，说明你核对了哪些样本外指标与风险" /></label>
+          <label>逐字输入确认短语<input value={promotionPhrase} onChange={(event) => setPromotionPhrase(event.target.value)} placeholder={String(ml?.promotionPolicy.confirmation ?? "")} /></label>
+          <button className="button primary" disabled={!canPromote || Boolean(busy) || promotionPhrase !== ml?.promotionPolicy.confirmation || rationale.trim().length < 16} onClick={() => selected && void run("promote", () => api.promoteModel({ modelId: selected.modelId, reviewer, rationale, confirmation: promotionPhrase, expectedGeneration: ml?.generation ?? 0 }), "champion 已晋级；自动执行仍保持关闭")}>{busy === "promote" ? "晋级中…" : "人工晋级"}</button>
+        </article>
+
+        <article className="surface lab-card lab-form-card automation-card">
+          <div className="lab-card-head"><div><span className="eyebrow">受控模型试运行</span><h2>单次 OKX Demo BUY 入场</h2></div><Activity size={22} /></div>
+          {activePermit ? <div className="permit-panel"><StatusDot /><div><strong>单次入场许可正在运行</strong><span>剩余 {activePermit.remainingSeconds}s · 已用 {activePermit.usedOrders}/1 笔 · {activePermit.usedNotionalUsdt}/10 USDT</span></div></div> : <p>这不是长期闭环执行。只有 champion、Demo 凭证和“演练”状态同时存在时才能启用；许可最多发送一笔 10 USDT BUY。SELL 与自动退出均被后端硬拒绝，成交后的退出需人工完成。</p>}
+          {!activePermit && <><div className="lab-facts"><span>仅 1 笔 BUY</span><span>固定 10 USDT</span><span>退出需人工</span></div><label>逐字输入确认短语<input value={automationPhrase} onChange={(event) => setAutomationPhrase(event.target.value)} placeholder={ml?.automation.confirmation ?? ""} /></label><div className="readiness-list"><span className={ml?.champion ? "ok" : "wait"}>{ml?.champion ? "✓" : "○"} champion</span><span className={status?.credentialConfigured ? "ok" : "wait"}>{status?.credentialConfigured ? "✓" : "○"} Demo 凭证</span><span className={status?.safety.mode === "armed" ? "ok" : "wait"}>{status?.safety.mode === "armed" ? "✓" : "○"} 演练已启用</span></div><button className="button primary" disabled={!canAuthorize || Boolean(busy) || automationPhrase !== ml?.automation.confirmation} onClick={() => void run("authorize", () => api.authorizeAutomation({ issuedBy: reviewer, confirmation: automationPhrase, ttlSeconds: 300, maxOrders: 1, maxTotalNotionalUsdt: "10" }), "Demo 单次 BUY 入场许可已启用")}>{busy === "authorize" ? "启用中…" : "启用 5 分钟单次入场"}</button></>}
+          {activePermit && <button className="button danger" disabled={Boolean(busy)} onClick={() => void run("stop", () => api.stopAutomation(), "自动会话已撤销，并触发急停核对")}>{busy === "stop" ? "停止中…" : "停止、撤单并锁定"}</button>}
+          <small className="form-note">研究 OOS 假设 12 根后按双边成本结算；运行时并不自动执行该退出。停止只会撤销 permit、触发急停并尝试撤销未成交挂单，不能逆转已成交 BUY。</small>
+        </article>
+      </section>
+
+      <section className="surface freqai-note"><Database size={22} /><div><h3>FreqAI 2026.7 兼容边界</h3><p>可选适配器只接收本机独立 FreqAI dry-run 进程的冻结信号，不把 Freqtrade 打进安装器，也不给它 OKX 凭证。Freqtrade 官方仍不支持 OKX sandbox，因此 Tideguard 保持唯一的 Demo 执行与风控入口。</p></div><span>未捆绑</span></section>
     </main>
   );
 }
@@ -728,7 +847,7 @@ export default function App() {
 
   const content = (() => {
     if (active === "settings") return <SettingsView status={status} onError={setNotice} />;
-    if (active === "lab") return <StrategyLab />;
+    if (active === "lab") return <StrategyLab status={status} onRefresh={refresh} onError={setNotice} />;
     if (active === "audit") return <AuditView events={events} chainValid={chainValid} error={auditError} />;
     if (active === "orders") return <main className="page-view"><div className="page-title"><div><p>OKX 模拟账户</p><h1>订单与对账</h1></div></div><OrdersTable orders={orders} configured={Boolean(status?.credentialConfigured)} error={ordersError} /></main>;
     if (active === "market") return <main className="page-view"><div className="page-title"><div><p>OKX 公共行情</p><h1>BTC / USDT 现货</h1></div></div><MarketPanel market={market} error={marketError} onRefresh={() => void refresh()} /><AccountStrip account={account} error={accountError} /></main>;

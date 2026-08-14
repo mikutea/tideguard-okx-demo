@@ -3,6 +3,7 @@ import type {
   AuditEvent,
   DemoOrder,
   MarketData,
+  MLStatus,
   PreviewResult,
   SystemStatus
 } from "./types";
@@ -79,5 +80,35 @@ export const api = {
         headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify({ digest: preview.digest })
       }
-    )
+    ),
+  getMLStatus: () => request<MLStatus>("/api/v1/ml/status"),
+  trainModel: (candleLimit = 2000) =>
+    request<Record<string, unknown>>("/api/v1/ml/train", {
+      method: "POST",
+      body: JSON.stringify({ candleLimit })
+    }),
+  promoteModel: (body: {
+    modelId: string;
+    reviewer: string;
+    rationale: string;
+    confirmation: string;
+    expectedGeneration: number;
+  }) =>
+    request<NonNullable<MLStatus["champion"]>>("/api/v1/ml/promote", {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
+  authorizeAutomation: (body: {
+    issuedBy: string;
+    confirmation: string;
+    ttlSeconds: number;
+    maxOrders: number;
+    maxTotalNotionalUsdt: string;
+  }) =>
+    request<Record<string, unknown>>("/api/v1/ml/automation/authorize", {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
+  stopAutomation: () =>
+    request<Record<string, unknown>>("/api/v1/ml/automation/stop", { method: "POST" })
 };

@@ -1,0 +1,5 @@
+# Build backends required before installing the hash-locked runtime without
+# build isolation (proxy-tools is currently distributed as an sdist).
+hatchling>=1.27
+setuptools>=80
+wheel>=0.45

@@ -52,6 +52,51 @@ async def test_private_endpoint_allowlist_is_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_history_candles_paginate_and_return_chronological_confirmed_rows() -> None:
+    cursors: list[str | None] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        after = request.url.params.get("after")
+        cursors.append(after)
+        if after is None:
+            timestamps = range(1_000, 700, -1)
+        elif after == "701":
+            timestamps = range(700, 400, -1)
+        elif after == "401":
+            timestamps = range(400, 350, -1)
+        else:
+            timestamps = []
+        rows = [
+            [str(ts), "1", "2", "0.5", "1.5", "10", "15", "15", "1"]
+            for ts in timestamps
+        ]
+        return httpx.Response(200, json={"code": "0", "msg": "", "data": rows})
+
+    client = OkxClient(transport=httpx.MockTransport(handler))
+    try:
+        rows = await client.get_history_candles(limit=650)
+    finally:
+        await client.close()
+
+    assert cursors == [None, "701", "401"]
+    assert len(rows) == 650
+    assert rows[0][0] == "351"
+    assert rows[-1][0] == "1000"
+
+
+@pytest.mark.asyncio
+async def test_history_candles_reject_unapproved_market_or_timeframe() -> None:
+    client = OkxClient()
+    try:
+        with pytest.raises(OkxClientError, match="只允许"):
+            await client.get_history_candles("ETH-USDT")
+        with pytest.raises(OkxClientError, match="只允许"):
+            await client.get_history_candles(bar="1h")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_place_order_forces_cash_and_application_tag() -> None:
     captured: list[dict[str, str]] = []
 

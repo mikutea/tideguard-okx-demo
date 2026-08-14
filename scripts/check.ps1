@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $pythonPath)) {
@@ -11,7 +11,7 @@ function Assert-NativeSuccess([string]$Step) {
     }
 }
 
-$pytestTemp = Join-Path $projectRoot '.pytest-temp'
+$pytestTemp = Join-Path ([System.IO.Path]::GetTempPath()) ('tideguard-pytest-' + [guid]::NewGuid().ToString('N'))
 & $pythonPath -m pytest (Join-Path $projectRoot 'backend\tests') --basetemp $pytestTemp -q
 Assert-NativeSuccess '后端测试'
 
@@ -25,7 +25,7 @@ try {
     Pop-Location
 }
 
-$secretPattern = '(?i)(OKX_API_KEY|OKX_API_SECRET|OKX_PASSPHRASE)\s*=\s*["''][^"'']{8,}["'']'
+$secretPattern = '(?i)(OKX_API_KEY|OKX_API_SECRET|OKX_PASSPHRASE)\s*=\s*[\x22\x27][^\x22\x27]{8,}[\x22\x27]'
 $ripgrep = Get-Command rg -ErrorAction SilentlyContinue
 if ($ripgrep) {
     $matches = & $ripgrep.Source -n --hidden -g '!.venv/**' -g '!node_modules/**' -g '!dist/**' -e $secretPattern $projectRoot
