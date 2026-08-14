@@ -26,10 +26,36 @@ try {
 }
 
 $secretPattern = '(?i)(OKX_API_KEY|OKX_API_SECRET|OKX_PASSPHRASE)\s*=\s*["''][^"'']{8,}["'']'
-$matches = rg -n --hidden -g '!.venv/**' -g '!node_modules/**' -g '!dist/**' -e $secretPattern $projectRoot
-if ($LASTEXITCODE -eq 0) {
-    throw "检测到疑似硬编码凭证：`n$matches"
+$ripgrep = Get-Command rg -ErrorAction SilentlyContinue
+if ($ripgrep) {
+    $matches = & $ripgrep.Source -n --hidden -g '!.venv/**' -g '!node_modules/**' -g '!dist/**' -e $secretPattern $projectRoot
+    if ($LASTEXITCODE -eq 0) {
+        throw "检测到疑似硬编码凭证：`n$matches"
+    }
+    if ($LASTEXITCODE -gt 1) { exit $LASTEXITCODE }
+} else {
+    $textExtensions = @('.py', '.ps1', '.ts', '.tsx', '.js', '.jsx', '.json', '.toml', '.yaml', '.yml', '.md', '.html', '.css')
+    $excludedRoots = @(
+        (Join-Path $projectRoot '.git'),
+        (Join-Path $projectRoot '.venv'),
+        (Join-Path $projectRoot 'frontend\node_modules'),
+        (Join-Path $projectRoot 'frontend\dist')
+    )
+    $scanFiles = Get-ChildItem -LiteralPath $projectRoot -Recurse -Force -File | Where-Object {
+        $candidate = $_.FullName
+        $isExcluded = $false
+        foreach ($excludedRoot in $excludedRoots) {
+            if ($candidate.StartsWith($excludedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                $isExcluded = $true
+                break
+            }
+        }
+        ($textExtensions -contains $_.Extension -or $_.Name -like '.env*') -and -not $isExcluded
+    }
+    $matches = $scanFiles | Select-String -Pattern $secretPattern
+    if ($matches) {
+        throw "检测到疑似硬编码凭证：`n$($matches -join "`n")"
+    }
 }
-if ($LASTEXITCODE -gt 1) { exit $LASTEXITCODE }
 
 Write-Host '全部离线检查通过；没有调用私有 OKX API，也没有发送订单。' -ForegroundColor Green
