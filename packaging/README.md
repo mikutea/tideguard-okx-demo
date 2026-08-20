@@ -90,8 +90,8 @@ application's existing credential workflow.
 Push an annotated semantic-version tag after the normal `main` checks pass:
 
 ```powershell
-git tag -a v0.2.0 -m "Tideguard v0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "Tideguard v0.3.0"
+git push origin v0.3.0
 ```
 
 `.github/workflows/release.yml` validates the tag, rebuilds from the lockfile,
@@ -108,6 +108,6 @@ password in the repository or PyInstaller data list.
 ## Silent install and uninstall
 
 ```powershell
-.\Tideguard-Setup-0.2.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+.\Tideguard-Setup-0.3.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 & "$env:LOCALAPPDATA\Programs\Tideguard\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```

@@ -27,6 +27,14 @@ class ReleaseContractTests(unittest.TestCase):
         for mutex_name in mutex.group(1).split(","):
             self.assertIn(mutex_name, launcher)
         self.assertIn('Parameters: "--credentials"', installer)
+        self.assertIn('Parameters: "--daemon"', installer)
+        self.assertIn('Parameters: "--stop-daemon"', installer)
+        self.assertIn(r'Name: "{userstartup}\Tideguard 后台服务"', installer)
+        self.assertIn('Tasks: autostart', installer)
+        self.assertNotRegex(
+            installer,
+            re.compile(r'Name: "autostart"[^\r\n]*Flags:\s*unchecked'),
+        )
         self.assertIn('Type: filesandordirs; Name: "{app}\\_internal"', installer)
         self.assertNotIn('Type: filesandordirs; Name: "{app}\\*"', installer)
 

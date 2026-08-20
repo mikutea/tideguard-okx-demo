@@ -23,7 +23,7 @@ class ResetKillRequest(StrictModel):
 class OrderDraft(StrictModel):
     instId: str
     side: Literal["buy", "sell"]
-    ordType: Literal["limit", "post_only"] = "limit"
+    ordType: Literal["limit", "post_only", "ioc"] = "limit"
     price: Decimal = Field(gt=0)
     size: Decimal = Field(gt=0)
 
@@ -58,6 +58,15 @@ class AutomationAuthorizeRequest(StrictModel):
     ttlSeconds: int = Field(default=300, ge=30, le=600)
     maxOrders: int = Field(default=1, ge=1, le=1)
     maxTotalNotionalUsdt: Decimal = Field(default=Decimal("10"), gt=0, le=10)
+
+
+class AutonomyEnableRequest(StrictModel):
+    mode: Literal["demo"] = "demo"
+    confirmation: str = Field(min_length=1, max_length=64)
+
+
+class AutonomyDisableRequest(StrictModel):
+    reason: str = Field(default="用户停止长期自动量化", min_length=1, max_length=512)
 
 
 class RiskCheck(BaseModel):

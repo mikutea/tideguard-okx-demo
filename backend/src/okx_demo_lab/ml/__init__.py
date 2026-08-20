@@ -1,8 +1,15 @@
-"""Offline-only model research and demo-execution contracts.
+"""Auditable research, Codex supervision, and Demo-only execution contracts.
 
-This package intentionally has no exchange client dependency.  A frozen model may
-produce a proposal, but the existing TradingService remains the only order path.
+Frozen models remain data-only.  The long-run coordinator may orchestrate the
+existing TradingService, which remains the sole exchange order path.
 """
+
+from .autonomy import (
+    AUTONOMY_ENABLE_CONFIRMATION,
+    AutonomyPolicy,
+    AutonomyStore,
+    SupervisorDecision,
+)
 
 from .execution import (
     AutomationDenied,
@@ -13,6 +20,8 @@ from .execution import (
     authorize_demo_session,
 )
 from .registry import ModelRegistry, PromotionDenied, PromotionPolicy
+from .long_run import LongRunCoordinator
+from .supervisor import CodexSupervisor
 from .strategy import (
     DEMO_ENVIRONMENT,
     DemoStrategyPolicy,
@@ -34,6 +43,10 @@ from .walk_forward import (
 __all__ = [
     "AutomationDenied",
     "AutomationLedger",
+    "AUTONOMY_ENABLE_CONFIRMATION",
+    "AutonomyPolicy",
+    "AutonomyStore",
+    "CodexSupervisor",
     "DEMO_ENVIRONMENT",
     "DemoAutoExecutor",
     "DemoAutomationPermit",
@@ -44,9 +57,11 @@ __all__ = [
     "MarketSnapshot",
     "ModelManifest",
     "ModelRegistry",
+    "LongRunCoordinator",
     "OrderProposal",
     "PromotionDenied",
     "PromotionPolicy",
+    "SupervisorDecision",
     "TrainingConfig",
     "ValidationReport",
     "WalkForwardSpec",

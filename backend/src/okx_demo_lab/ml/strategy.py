@@ -372,8 +372,8 @@ class DemoStrategyPolicy:
             raise ValueError("market age cannot exceed the hard 8 second limit")
         if not 1 <= self.max_signal_age_seconds <= 600:
             raise ValueError("signal age cannot exceed 600 seconds")
-        if self.order_type not in {"limit", "post_only"}:
-            raise ValueError("only limit and post_only demo orders are supported")
+        if self.order_type not in {"limit", "post_only", "ioc"}:
+            raise ValueError("only limit, post_only and ioc demo orders are supported")
 
     @property
     def policy_sha256(self) -> str:

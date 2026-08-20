@@ -58,14 +58,9 @@ async def test_history_candles_paginate_and_return_chronological_confirmed_rows(
     async def handler(request: httpx.Request) -> httpx.Response:
         after = request.url.params.get("after")
         cursors.append(after)
-        if after is None:
-            timestamps = range(1_000, 700, -1)
-        elif after == "701":
-            timestamps = range(700, 400, -1)
-        elif after == "401":
-            timestamps = range(400, 350, -1)
-        else:
-            timestamps = []
+        newest = 1_000 if after is None else int(after) - 1
+        oldest = newest - int(request.url.params["limit"]) + 1
+        timestamps = range(newest, oldest - 1, -1)
         rows = [
             [str(ts), "1", "2", "0.5", "1.5", "10", "15", "15", "1"]
             for ts in timestamps
@@ -78,7 +73,7 @@ async def test_history_candles_paginate_and_return_chronological_confirmed_rows(
     finally:
         await client.close()
 
-    assert cursors == [None, "701", "401"]
+    assert cursors == [None, "901", "801", "701", "601", "501", "401"]
     assert len(rows) == 650
     assert rows[0][0] == "351"
     assert rows[-1][0] == "1000"

@@ -1,69 +1,70 @@
-# 验证记录
+# Tideguard v0.3 验证记录
 
-验证日期：2026-08-14。
+验证日期：2026-08-20。本文只记录已实际运行的检查；历史回放、公共行情、安装验收和模拟盘私有订单验证严格区分。
 
-## 自动检查
+## 离线与故障注入
 
-最终工作树执行结果：
+- `scripts/check.ps1`：后端 `123 passed`，前端 TypeScript 检查与 Vite 生产构建通过。
+- Python 3.11.15 发行环境再次运行后端 `123 passed`。
+- 桌面宿主 `14 passed`；Windows 发行契约 `5 passed`。
+- PyInstaller 使用 Python 3.11.15 生成 Windows x64 GUI `onedir`，冻结 EXE 的构建期 `--self-test` 返回 0。
+- 测试覆盖模拟标头和端点白名单、签名、cash/tag、账户身份、CAA、限频、分页、超时歧义、clOrdId 回查、并发提交、急停/复位竞态、取消和重启恢复。
+- v0.3 新覆盖 scheduled training 恢复、walk-forward v3、bracket 标签、未来 shadow、相对 champion 改善门、Codex applied 决策、稳定证据哈希、短时 scoped arm、最终 HTTP 前 master/generation/lease 门、IOC 部分成交、手续费净库存、自动退出、残余人工核对和持仓哈希篡改锁定。
 
-- `scripts/check.ps1`：后端 89 项测试通过。
-- 桌面宿主：9 项测试通过。
-- Windows 打包契约：5 项测试通过。
-- TypeScript 类型检查通过。
-- Vite 生产构建通过，1580 个模块完成转换。
-- 硬编码凭证模式扫描通过。
+唯一依赖告警是 Starlette 对旧 `httpx` TestClient 兼容层的弃用提示，不影响测试结果或运行路径。
 
-后端覆盖签名、模拟盘标头、私有端点白名单、cash/tag 固定、公共历史 K 线分页、基础风控、审计脱敏与审计链篡改锁定、持久急停严格解析、订单歧义与回查、并发派发、崩溃恢复、急停/复位竞态、账户身份绑定、挂单分页、CAA 租约与限频，以及取消时 fail-closed 行为。
+## 真实 OKX 公共数据验证
 
-模型测试另外覆盖时间隔离、label horizon 与 embargo、现货 long/flat 固定周期评估、持仓期信号忽略、非重叠资本、SELL 不产生空头收益、旧 v1 报告禁止晋级、冻结模型篡改检测、人工晋级 CAS、单次许可、SELL 双层拒绝、提交结果未知时禁止重试，以及授权/停机故障注入。
+本轮只调用无需凭证的 OKX 公共接口：
 
-这些仍是离线单元与故障编排测试，不是 OKX 私有模拟盘端到端订单验证。
+- history-candles 以每页 100 根、游标严格前进和保守限频取回 10,000 根 `BTC-USDT 5m` K 线；
+- 10,000/10,000 根通过 9 字段、`confirm=1`、时间顺序和严格 5 分钟连续性检查；
+- 三组 challenger 在真实数据上均完成 9 个外层 OOS 折和 4,500 个 OOS 行；
+- 合成 10,000 根训练基准约 33.3 秒；安装版首次真实公共数据训练从 18:29:00 至 18:30:31 完成，期间 UI/daemon 健康。
 
-## 公共行情与本地状态检查
+安装版首次候选结果：
 
-- `environment = OKX 模拟盘`
-- `mode = observe`
-- `credentialConfigured = false`
-- SQLite `integrity_check = ok`
-- `auditChainValid = true`
-- OKX 公共接口返回 `BTC-USDT / SPOT`、正数 ticker，以及 96 根、每根 9 字段的 5 分钟 K 线。
-- 本轮没有调用私有 OKX API，没有下单或撤单。
+| 模型 | OOS 交易 | OOS 净结果 | 主要失败门 |
+|---|---:|---:|---|
+| `mdl_77cc2c714b1ffc389a2ea963` | 1 | 0.2456% | 交易数不足、净结果低于 0.5% |
+| `mdl_3cb7e5eec38ac1b26ace5c1d` | 1 | 0.2456% | 交易数不足、净结果低于 0.5% |
+| `mdl_2807267583cdf50654b3f3a8` | 0 | 0.0000% | 交易数不足、净结果低于 0.5% |
 
-使用 2000 根真实 OKX 公共、已完成 K 线重新训练了 v2 候选 `mdl_a08bb2a016a39966544f883e`：
-
-- 评估模式：`long-only-fixed-horizon-non-overlapping`
-- 5 个 OOS 折、1000 个 OOS 行、2 次非重叠 long 入场
-- long/flat 准确率约 69.93%
-- 扣双边成本后的固定周期诊断净值约 -0.51%
-- 最大回撤约 0.51%
-- 门槛失败：交易数不足、整体净值未达标
-
-因此该候选未晋级，当前没有 champion，也没有自动执行许可。该结果说明方向准确率不能代替扣成本后的可执行绩效判断。
+三者因此都保持 `validated`，没有 champion、没有 execution lease、没有交易。约 88% 的 long/flat 准确率主要来自 HOLD，未被当作收益证据。
 
 ## 浏览器验收
 
-- 桌面 1280 px 视口无页面级横向溢出，策略实验室双列布局正常。
-- 移动端显式设置 375×812，文档 `clientWidth = scrollWidth = 360`，无页面级横向溢出。
-- 移动端 6 个导航入口全部存在，DOM 中只有一个主区、顶栏和移动导航。
-- 控制台没有 error 或 warn。
-- 未配置凭证/未晋级 champion 时，自动许可按钮保持禁用。
-- 最终界面明确区分固定周期 long-only OOS 研究诊断与 v0.2 单次 Demo BUY 入场；不显示盈利承诺。
+使用真实本机 FastAPI + Vite 生产资源、空凭证和临时数据目录验证：
 
-## Windows 发行验证
+- 桌面视口 `1280`：`clientWidth=scrollWidth=1265`，无页面级横向溢出；
+- 移动视口 `390×844`：`clientWidth=scrollWidth=375`，6 个移动导航入口可见；
+- “长期 AI 自动量化”页只存在 1 个主页面、1 个 master 卡、1 个持仓卡和 1 个 footer；
+- 未配置凭证时，即使填入 `ENABLE LONG-RUN OKX DEMO`，启用按钮仍为 disabled；
+- 刷新交互正常，控制台 `0 error / 0 warning`；
+- 修复了公共请求耗时导致 ticker 被错误判断为“来自未来”的问题，随后多个周期 `autonomy.cycle_failed=0`。
 
-- PyInstaller `onedir` 冻结 EXE 的 `--self-test` 返回 0。
-- Inno Setup 静默安装返回 0。
-- 安装后的 EXE `--self-test` 返回 0。
-- 静默卸载返回 0；卸载后 `Tideguard.exe` 与 `_internal` 均不存在。
-- 安装包逐文件 manifest、秘密/本地状态排除检查和 SHA-256 清单均通过。
-- 产物不包含 API 凭证、SQLite、`.env` 或私钥文件。
+## Windows 发行与安装
 
-当前 Windows 安装包没有代码签名，SmartScreen 可能显示信誉警告；这不是哈希失败，用户应从本仓库 Release 下载并对照 `SHA256SUMS.txt`。
+发行文件：
+
+| 文件 | 大小 | SHA-256 |
+|---|---:|---|
+| `Tideguard-Setup-0.3.0.exe` | 21,635,767 | `6eeb721282719cc40f335e4dcd07f9f377f09ba88145cc0630ea97f742abc1ea` |
+| `Tideguard-0.3.0-windows-x64.zip` | 23,064,832 | `a9f56ee5e9377b75f52c35ee6097389e30cd7b818a9a5502ce9ad8ffab440bfa` |
+| `Tideguard-0.3.0-manifest.json` | 42,938 | `eda59c6a8e28a94c8f6014dc9d80f9c994b83228f946d952b4a66c9b6ae442b6` |
+
+- ZIP 解包后 228/228 个文件的大小与 SHA-256 均匹配 manifest；`credentialsBundled=false`。
+- 安装目录 `%LOCALAPPDATA%\Programs\Tideguard` 的 228/228 个发行文件再次逐项匹配 manifest。
+- 安装器注册版本 0.3.0，创建主界面、凭证管理、停止后台三个开始菜单入口，以及当前用户登录自启动 daemon。
+- 已安装 daemon 进程参数为 `Tideguard.exe --daemon`，`/healthz` 返回 `Tideguard / demo / 0.3.0`。
+- 当前运行状态：`desiredMode=disabled`、`credentialConfigured=false`、`safety=observe`、`killActive=false`、`auditChainValid=true`。
+
+本机 Codex 已创建每 6 小时一次的 `Tideguard Codex Supervisor` 周期任务。它只运行脱敏 supervisor CLI；不得访问凭证、私有 API、订单、风控代码或用户 master。
 
 ## 尚未验证或有意未开放
 
-- 本程序尚未配置用户的 OKX Demo API 凭证。
-- 未运行私有账户读取、模拟盘下单、成交、查询或撤单 smoke test。
-- v0.2 自动路径只允许一次最多 10 USDT 的 Demo BUY，不会自动 SELL；退出需要人工完成，因此不是长期闭环策略执行器。
-- Freqtrade/FreqAI 不随安装器捆绑；当前采用本项目原生、可审计的数据模型与兼容边界。
-- 没有正式盘代码路径，也未做正式盘验证。
+- 没有配置用户 OKX Demo 凭证，没有调用私有账户、下单、成交、撤单或复位接口。
+- Demo master 尚未启用；必须等待未来候选同时通过 OOS、至少 7 天/20 BUY shadow、相对改善和 Codex 审查后，再开始小额模拟盘测试。
+- 没有正式盘路径、杠杆、转账或提现能力。
+- Freqtrade/FreqAI 不随安装器捆绑；当前使用本项目原生可审计模型链。
+- Tideguard 自身二进制尚未代码签名，SmartScreen 可能提示未知发布者；应从本仓库 Release 下载并核对 `SHA256SUMS.txt`。

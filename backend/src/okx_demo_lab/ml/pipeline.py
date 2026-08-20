@@ -206,17 +206,37 @@ def build_observations(
     *,
     label_horizon: int = DEFAULT_LABEL_HORIZON,
     round_trip_cost_bps: float = 12.0,
+    stop_loss_fraction: float = 0.015,
+    take_profit_fraction: float = 0.025,
 ) -> tuple[Observation, ...]:
     if not 1 <= label_horizon <= 96:
         raise DatasetError("label horizon is outside the supported range")
     if not math.isfinite(round_trip_cost_bps) or round_trip_cost_bps <= 0:
         raise DatasetError("round-trip cost must be positive")
+    if not math.isfinite(stop_loss_fraction) or not 0 < stop_loss_fraction <= 0.05:
+        raise DatasetError("stop-loss fraction is invalid")
+    if not math.isfinite(take_profit_fraction) or not 0 < take_profit_fraction <= 0.10:
+        raise DatasetError("take-profit fraction is invalid")
     if len(candles) <= WARMUP_BARS + label_horizon:
         raise DatasetError("dataset is too short after warmup and label horizon")
     required_return = round_trip_cost_bps / 10_000.0
     observations: list[Observation] = []
     for index in range(WARMUP_BARS, len(candles) - label_horizon):
-        forward_return = candles[index + label_horizon].close / candles[index].close - 1.0
+        entry_close = candles[index].close
+        stop_price = entry_close * (1.0 - stop_loss_fraction)
+        take_price = entry_close * (1.0 + take_profit_fraction)
+        forward_return: float | None = None
+        for future in candles[index + 1 : index + label_horizon + 1]:
+            # OHLC cannot reveal which barrier was first inside one candle.  Use
+            # the adverse outcome to keep validation conservative and stable.
+            if future.low <= stop_price:
+                forward_return = -stop_loss_fraction
+                break
+            if future.high >= take_price:
+                forward_return = take_profit_fraction
+                break
+        if forward_return is None:
+            forward_return = candles[index + label_horizon].close / entry_close - 1.0
         observations.append(
             Observation(
                 observed_at=candles[index].closed_at,
@@ -243,17 +263,21 @@ def train_and_register_candidate(
     now: datetime,
     code_revision: str,
     promotion_policy: PromotionPolicy | None = None,
+    training_config: TrainingConfig | None = None,
+    walk_forward_spec: WalkForwardSpec | None = None,
 ) -> CandidateTrainingResult:
     """Train an offline, data-only candidate; never promote or trade automatically."""
 
     candles = parse_completed_candles(raw_candles, now=now)
-    config = TrainingConfig(round_trip_cost_bps=12.0)
+    config = training_config or TrainingConfig(round_trip_cost_bps=12.0)
     observations = build_observations(
         candles,
         label_horizon=DEFAULT_LABEL_HORIZON,
         round_trip_cost_bps=config.round_trip_cost_bps,
+        stop_loss_fraction=config.stop_loss_fraction,
+        take_profit_fraction=config.take_profit_fraction,
     )
-    spec = WalkForwardSpec(
+    spec = walk_forward_spec or WalkForwardSpec(
         train_size=800,
         test_size=200,
         step_size=200,
@@ -271,7 +295,10 @@ def train_and_register_candidate(
         trained_from=observations[0].observed_at,
         trained_through=observations[-1].observed_at,
         created_at=now.astimezone(timezone.utc),
-        trainer="tideguard-native-linear-logit-v2-long-only-research",
+        trainer=(
+            "tideguard-native-linear-logit-v3-long-run-"
+            + config.sha256[:12]
+        ),
         random_seed=0,
         feature_schema_sha256=feature_schema_hash(FEATURE_NAMES),
     )
@@ -298,6 +325,8 @@ def feature_contract_sha256() -> str:
                 "feature_names": list(FEATURE_NAMES),
                 "label_horizon": DEFAULT_LABEL_HORIZON,
                 "evaluation_mode": LONG_ONLY_EVALUATION_MODE,
+                "stop_loss_fraction": TrainingConfig().stop_loss_fraction,
+                "take_profit_fraction": TrainingConfig().take_profit_fraction,
                 "warmup_bars": WARMUP_BARS,
             }
         )

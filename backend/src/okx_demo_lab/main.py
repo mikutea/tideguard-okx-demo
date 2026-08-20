@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import secrets as token_secrets
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +16,15 @@ from fastapi.staticfiles import StaticFiles
 from .audit import AuditStore
 from .config import APP_NAME, OKX_BASE_URL, POLICY, SIMULATED_HEADER, app_data_dir
 from .ml.execution import AutomationDenied
+from .ml.autonomy import AutonomyError, AutonomyStore, PositionStateError
+from .ml.long_run import LongRunCoordinator, LongRunError
 from .ml.pipeline import DatasetError
 from .ml.registry import PromotionDenied, RegistryError
 from .ml.runtime import MLCoordinator, MLRuntimeError
 from .models import (
     ArmRequest,
+    AutonomyDisableRequest,
+    AutonomyEnableRequest,
     AutomationAuthorizeRequest,
     CommitRequest,
     ModelPromoteRequest,
@@ -47,6 +53,108 @@ ALLOWED_ORIGINS = {
 }
 
 
+SAFE_AUTONOMY_RECOVERY_INTENT_STATES = frozenset(
+    {"accepted", "reconciled", "terminal_verified"}
+)
+PROVEN_NO_DISPATCH_INTENT_STATES = frozenset(
+    {"blocked_before_dispatch", "rejected"}
+)
+
+
+def recover_autonomy_position_before_loop(
+    autonomy: AutonomyStore,
+    store: AuditStore,
+    long_run: LongRunCoordinator,
+) -> str | None:
+    """Recover only states that prove no dispatch occurred, else return a kill reason."""
+
+    position = autonomy.active_position()
+    if position is None or position["status"] == "long":
+        return None
+    status = str(position["status"])
+    if status == "manual_review":
+        return "检测到重启前需要核对的自动订单"
+    position_id = str(position["positionId"])
+    intent_id = str(
+        (
+            position.get("entryIntentId")
+            if status == "entry_submitted"
+            else position.get("exitIntentId")
+        )
+        or ""
+    )
+    if status == "entry_submitted" and not intent_id:
+        autonomy.resolve_entry(
+            position_id,
+            filled_size=Decimal("0"),
+            average_price=None,
+            terminal_state="canceled",
+            policy=long_run.policy,
+            now=long_run._now(),
+        )
+        store.append(
+            "autonomy.startup_abandoned_pre_dispatch_entry",
+            {"positionId": position_id},
+            actor="system",
+            correlation_id=position_id,
+        )
+        return None
+    if not intent_id:
+        return "自动退出状态缺少订单意图，无法安全恢复"
+    intent = store.get_intent(intent_id)
+    if intent is None:
+        return "自动订单意图缺失，无法安全恢复"
+    if not intent.get("commit_key"):
+        if status == "entry_submitted":
+            autonomy.resolve_entry(
+                position_id,
+                filled_size=Decimal("0"),
+                average_price=None,
+                terminal_state="canceled",
+                policy=long_run.policy,
+                now=long_run._now(),
+            )
+        else:
+            autonomy.abandon_exit_before_dispatch(position_id, now=long_run._now())
+        store.append(
+            "autonomy.startup_abandoned_pre_dispatch_preview",
+            {"intentId": intent_id, "positionId": position_id, "side": "buy" if status == "entry_submitted" else "sell"},
+            actor="system",
+            correlation_id=position_id,
+        )
+        return None
+    intent_status = str(intent.get("status") or "")
+    if intent_status in PROVEN_NO_DISPATCH_INTENT_STATES:
+        if status == "entry_submitted":
+            autonomy.resolve_entry(
+                position_id,
+                filled_size=Decimal("0"),
+                average_price=None,
+                terminal_state="canceled",
+                policy=long_run.policy,
+                now=long_run._now(),
+            )
+        else:
+            autonomy.resolve_exit(
+                position_id,
+                filled_size=Decimal("0"),
+                average_price=None,
+                terminal_state="canceled",
+                max_exit_attempts=long_run.policy.max_exit_attempts,
+                now=long_run._now(),
+            )
+        store.append(
+            "autonomy.startup_resolved_proven_rejection",
+            {"intentId": intent_id, "positionId": position_id, "status": intent_status},
+            actor="system",
+            correlation_id=position_id,
+        )
+        return None
+    if intent_status not in SAFE_AUTONOMY_RECOVERY_INTENT_STATES:
+        return "自动订单派发终态不确定，无法安全恢复"
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     data_dir = app_data_dir()
@@ -70,7 +178,38 @@ async def lifespan(app: FastAPI):
     app.state.safety = safety
     app.state.service = service
     ml = MLCoordinator(data_dir=data_dir, client=client, service=service, store=store)
+    autonomy = AutonomyStore(data_dir / "autonomy.sqlite3")
+    recovered_training_runs = autonomy.recover_running_training(
+        now=datetime.now(timezone.utc)
+    )
+    if recovered_training_runs:
+        store.append(
+            "ml.training_recovered_after_restart",
+            {"count": recovered_training_runs},
+            actor="system",
+        )
+    long_run = LongRunCoordinator(
+        client=client,
+        service=service,
+        audit=store,
+        registry=ml.registry,
+        autonomy=autonomy,
+    )
+    try:
+        autonomy_recovery_reason = recover_autonomy_position_before_loop(
+            autonomy, store, long_run
+        )
+    except PositionStateError:
+        autonomy_recovery_reason = "自动持仓持久状态完整性异常，已锁定"
+    if autonomy_recovery_reason:
+        binding = autonomy.bound_identity()
+        store.engage_kill_latch(*(binding or (None, None)))
+        safety.acknowledge_persisted_kill(
+            autonomy_recovery_reason, actor="system"
+        )
     app.state.ml = ml
+    app.state.autonomy = autonomy
+    app.state.long_run = long_run
     app.state.csrf_token = token_secrets.token_urlsafe(32)
     app.state.deadman_task = None
     app.state.ml_task = None
@@ -100,7 +239,7 @@ async def lifespan(app: FastAPI):
                     pass
 
     app.state.deadman_task = asyncio.create_task(deadman_loop())
-    app.state.ml_task = asyncio.create_task(ml.run())
+    app.state.ml_task = asyncio.create_task(long_run.run())
     try:
         yield
     finally:
@@ -111,6 +250,7 @@ async def lifespan(app: FastAPI):
                 await ml_task
             except asyncio.CancelledError:
                 pass
+        await long_run.close()
         await ml.close()
         task = app.state.deadman_task
         if task:
@@ -125,7 +265,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Tideguard OKX Demo API",
-    version="0.2.0",
+    version="0.3.0",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -162,7 +302,7 @@ def service(request: Request) -> TradingService:
 async def system_status(request: Request) -> dict[str, Any]:
     return {
         "app": APP_NAME,
-        "version": "0.2.0",
+        "version": "0.3.0",
         "environment": "OKX 模拟盘",
         "demoHeader": SIMULATED_HEADER,
         "baseUrl": OKX_BASE_URL,
@@ -261,6 +401,8 @@ async def reset_kill(request: Request, body: ResetKillRequest) -> dict[str, Any]
 async def preview(request: Request, draft: OrderDraft) -> dict[str, Any]:
     try:
         return await service(request).preview(draft)
+    except SafetyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except OkxClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -283,7 +425,10 @@ async def commit(
 @app.get("/api/v1/ml/status")
 async def ml_status(request: Request) -> dict[str, Any]:
     try:
-        return request.app.state.ml.status()
+        return {
+            **request.app.state.ml.status(),
+            "longRun": request.app.state.long_run.status(),
+        }
     except (RegistryError, AutomationDenied, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -300,32 +445,22 @@ async def ml_train(request: Request, body: ModelTrainRequest) -> dict[str, Any]:
 
 @app.post("/api/v1/ml/promote")
 async def ml_promote(request: Request, body: ModelPromoteRequest) -> dict[str, Any]:
-    try:
-        return await request.app.state.ml.promote(
-            body.modelId,
-            reviewer=body.reviewer,
-            rationale=body.rationale,
-            confirmation=body.confirmation,
-            expected_generation=body.expectedGeneration,
-        )
-    except (PromotionDenied, RegistryError, ValueError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    del request, body
+    raise HTTPException(
+        status_code=410,
+        detail="v0.3 已关闭浏览器人工晋级；只能由本机 Codex Supervisor 审查脱敏证据后晋级",
+    )
 
 
 @app.post("/api/v1/ml/automation/authorize")
 async def ml_automation_authorize(
     request: Request, body: AutomationAuthorizeRequest
 ) -> dict[str, Any]:
-    try:
-        return await request.app.state.ml.authorize(
-            issued_by=body.issuedBy,
-            confirmation=body.confirmation,
-            ttl_seconds=body.ttlSeconds,
-            max_orders=body.maxOrders,
-            max_total_notional_usdt=body.maxTotalNotionalUsdt,
-        )
-    except (AutomationDenied, RegistryError, ValueError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    del request, body
+    raise HTTPException(
+        status_code=410,
+        detail="v0.3 已停用旧版单次 BUY 许可；请使用 Codex 监督的长期 Demo master switch",
+    )
 
 
 @app.post("/api/v1/ml/automation/stop")
@@ -336,9 +471,86 @@ async def ml_automation_stop(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.get("/api/v1/autonomy/status")
+async def autonomy_status(request: Request) -> dict[str, Any]:
+    try:
+        return request.app.state.long_run.status()
+    except (AutonomyError, RegistryError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/autonomy/review-pack")
+async def autonomy_review_pack(request: Request) -> dict[str, Any]:
+    try:
+        return request.app.state.long_run.supervisor.review_pack(
+            now=request.app.state.long_run._now()
+        )
+    except (AutonomyError, RegistryError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/autonomy/train")
+async def autonomy_train(request: Request) -> dict[str, Any]:
+    try:
+        return await request.app.state.long_run.train_now()
+    except (LongRunError, DatasetError, RegistryError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OkxClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/autonomy/master/enable")
+async def autonomy_enable(
+    request: Request, body: AutonomyEnableRequest
+) -> dict[str, Any]:
+    try:
+        binding = await service(request).current_identity_binding()
+        state = request.app.state.autonomy.enable_master(
+            mode=body.mode,
+            credential_fingerprint=binding[0],
+            account_fingerprint=binding[1],
+            confirmation=body.confirmation,
+            now=request.app.state.long_run._now(),
+        )
+        request.app.state.store.append(
+            "autonomy.master_enabled",
+            {"identityBound": True, "mode": body.mode},
+            actor="user",
+        )
+        return state
+    except (AutonomyError, SafetyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OkxClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/autonomy/master/disable")
+async def autonomy_disable(
+    request: Request, body: AutonomyDisableRequest
+) -> dict[str, Any]:
+    try:
+        state = request.app.state.autonomy.disable_master(
+            body.reason,
+            now=request.app.state.long_run._now(),
+        )
+        request.app.state.store.append(
+            "autonomy.master_disabled",
+            {"reason": body.reason},
+            actor="user",
+        )
+        return state
+    except (AutonomyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
-    return {"status": "ok", "environment": "demo"}
+    return {
+        "status": "ok",
+        "app": APP_NAME,
+        "environment": "demo",
+        "version": "0.3.0",
+    }
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]

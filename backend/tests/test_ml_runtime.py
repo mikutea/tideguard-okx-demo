@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from okx_demo_lab.ml.pipeline import (
+    build_observations,
     DatasetError,
     FEATURE_NAMES,
     latest_features,
@@ -58,6 +59,23 @@ def test_runtime_features_require_confirmed_contiguous_candles() -> None:
         parse_completed_candles(gapped, now=now)
 
 
+def test_training_label_uses_the_live_bracket_with_adverse_same_bar_ordering() -> None:
+    now = datetime.now(timezone.utc)
+    rows = _candles(80)
+    entry_close = Decimal(rows[48][4])
+    rows[49][2] = str(entry_close * Decimal("1.03"))
+    rows[49][3] = str(entry_close * Decimal("0.98"))
+    observations = build_observations(
+        parse_completed_candles(rows, now=now),
+        label_horizon=12,
+        round_trip_cost_bps=24,
+        stop_loss_fraction=0.015,
+        take_profit_fraction=0.025,
+    )
+    assert observations[0].forward_return == pytest.approx(-0.015)
+    assert observations[0].label == 0
+
+
 @pytest.mark.asyncio
 async def test_coordinator_is_network_idle_without_explicit_permit(tmp_path) -> None:
     class NoNetworkClient:
@@ -100,12 +118,49 @@ def test_ml_status_route_and_training_bounds(tmp_path, monkeypatch) -> None:
         response = client.get("/api/v1/ml/status")
         assert response.status_code == 200
         assert response.json()["automation"]["demoOnly"] is True
+        assert response.json()["longRun"]["state"]["desiredMode"] == "disabled"
+        autonomy = client.get("/api/v1/autonomy/status")
+        assert autonomy.status_code == 200
+        assert autonomy.json()["activePosition"] is None
+        review = client.get("/api/v1/autonomy/review-pack")
+        assert review.status_code == 200
+        assert review.json()["schemaVersion"] == "tideguard.codex-review.v1"
+        enable = client.post(
+            "/api/v1/autonomy/master/enable",
+            headers={"X-Tideguard-CSRF": csrf},
+            json={"mode": "demo", "confirmation": "ENABLE LONG-RUN OKX DEMO"},
+        )
+        assert enable.status_code == 409
         invalid = client.post(
             "/api/v1/ml/train",
             headers={"X-Tideguard-CSRF": csrf},
             json={"candleLimit": 1_000},
         )
         assert invalid.status_code == 422
+        legacy_promote = client.post(
+            "/api/v1/ml/promote",
+            headers={"X-Tideguard-CSRF": csrf},
+            json={
+                "modelId": "mdl_" + "1" * 24,
+                "reviewer": "tester",
+                "rationale": "This legacy browser promotion is intentionally disabled.",
+                "confirmation": "PROMOTE OKX DEMO CHAMPION",
+                "expectedGeneration": 0,
+            },
+        )
+        assert legacy_promote.status_code == 410
+        legacy_authorize = client.post(
+            "/api/v1/ml/automation/authorize",
+            headers={"X-Tideguard-CSRF": csrf},
+            json={
+                "issuedBy": "tester",
+                "confirmation": "ENABLE OKX DEMO AUTO",
+                "ttlSeconds": 60,
+                "maxOrders": 1,
+                "maxTotalNotionalUsdt": "10",
+            },
+        )
+        assert legacy_authorize.status_code == 410
 
 
 def _permit() -> DemoAutomationPermit:

@@ -328,7 +328,8 @@ class ModelRegistry:
                        v.report_sha256, v.recorded_at
                 FROM model_candidates AS m
                 LEFT JOIN validation_reports AS v ON v.model_id = m.model_id
-                ORDER BY m.created_at DESC
+                ORDER BY CASE WHEN m.state = 'champion' THEN 0 ELSE 1 END,
+                         m.created_at DESC
                 LIMIT ?
                 """,
                 (safe_limit,),
@@ -578,5 +579,158 @@ class ModelRegistry:
             model_id=bundle.model_id,
             artifact_sha256=bundle.artifact_sha256,
             generation=int(state["generation"]),
+            bundle=bundle,
+        )
+
+    def load_model(self, model_id: str) -> FrozenModelBundle:
+        """Load any registered data-only model for shadow evaluation.
+
+        This never executes pickle/joblib code and revalidates the canonical
+        artifact and manifest on every load.
+        """
+
+        if not model_id.startswith("mdl_") or len(model_id) != 28:
+            raise RegistryError("model identity is invalid")
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT * FROM model_candidates WHERE model_id = ?", (model_id,)
+            ).fetchone()
+        if row is None:
+            raise RegistryError("model does not exist")
+        return self._bundle_from_row(row)
+
+    def reject_candidate(self, model_id: str) -> None:
+        """Atomically retire a non-executable candidate from future shadow work."""
+
+        with self._lock, self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            updated = db.execute(
+                """
+                UPDATE model_candidates SET state = 'rejected'
+                WHERE model_id = ? AND state IN ('candidate', 'validated')
+                """,
+                (model_id,),
+            )
+            if updated.rowcount != 1:
+                raise RegistryError("only a non-executable candidate can be rejected")
+
+    def rollback_to(
+        self,
+        model_id: str,
+        *,
+        policy: PromotionPolicy,
+        reviewer: str,
+        rationale: str,
+        expected_generation: int,
+        approved_at: datetime,
+    ) -> ChampionSnapshot:
+        """Reactivate a previously promoted model with a new generation CAS."""
+
+        if not reviewer.strip() or len(reviewer.strip()) > 128:
+            raise PromotionDenied("a bounded rollback reviewer identity is required")
+        if len(rationale.strip()) < 16 or len(rationale.strip()) > 2_000:
+            raise PromotionDenied("a rollback rationale of 16-2000 characters is required")
+        approved = _iso(approved_at)
+        with self._lock, self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            state = db.execute(
+                "SELECT champion_model_id, generation FROM registry_state WHERE singleton = 1"
+            ).fetchone()
+            if state is None or int(state["generation"]) != expected_generation:
+                raise PromotionDenied("registry generation changed during rollback")
+            current_model_id = state["champion_model_id"]
+            if not current_model_id or current_model_id == model_id:
+                raise PromotionDenied("rollback target is not a previous champion")
+            prior_promotion = db.execute(
+                "SELECT 1 FROM promotions WHERE model_id = ? LIMIT 1", (model_id,)
+            ).fetchone()
+            row = db.execute(
+                "SELECT * FROM model_candidates WHERE model_id = ?", (model_id,)
+            ).fetchone()
+            if prior_promotion is None or row is None or row["state"] != "retired":
+                raise PromotionDenied("rollback target is not a retired verified champion")
+            try:
+                bundle = self._bundle_from_row(row)
+            except (ModelArtifactError, RegistryError) as exc:
+                raise PromotionDenied("rollback artifact integrity check failed") from exc
+            validation = db.execute(
+                "SELECT * FROM validation_reports WHERE model_id = ?", (model_id,)
+            ).fetchone()
+            if validation is None:
+                raise PromotionDenied("rollback target has no validation report")
+            report_json = str(validation["report_json"])
+            if not hmac.compare_digest(
+                sha256_hex(report_json), str(validation["report_sha256"])
+            ):
+                raise PromotionDenied("rollback validation report hash mismatch")
+            try:
+                report = ValidationReport.from_dict(json.loads(report_json))
+            except (json.JSONDecodeError, ValidationError) as exc:
+                raise PromotionDenied("rollback validation report is invalid") from exc
+            failures = policy.failures(report)
+            if failures:
+                raise PromotionDenied(
+                    "rollback model no longer passes gates: " + ", ".join(failures)
+                )
+            next_generation = expected_generation + 1
+            retired = db.execute(
+                "UPDATE model_candidates SET state = 'retired' WHERE model_id = ? AND state = 'champion'",
+                (current_model_id,),
+            )
+            activated = db.execute(
+                "UPDATE model_candidates SET state = 'champion' WHERE model_id = ? AND state = 'retired'",
+                (model_id,),
+            )
+            if retired.rowcount != 1 or activated.rowcount != 1:
+                raise PromotionDenied("champion state changed during rollback")
+            state_update = db.execute(
+                """
+                UPDATE registry_state
+                SET champion_model_id = ?, generation = ?, updated_at = ?
+                WHERE singleton = 1 AND generation = ?
+                """,
+                (model_id, next_generation, approved, expected_generation),
+            )
+            if state_update.rowcount != 1:
+                raise PromotionDenied("registry generation changed during rollback")
+            material = canonical_json(
+                {
+                    "approved_at": approved,
+                    "artifact_sha256": bundle.artifact_sha256,
+                    "generation": next_generation,
+                    "model_id": model_id,
+                    "policy_sha256": policy.policy_sha256,
+                    "previous_model_id": current_model_id,
+                    "report_sha256": report.report_sha256,
+                    "reviewer": reviewer.strip(),
+                    "rollback": True,
+                }
+            )
+            promotion_id = f"prom_{hashlib.sha256(material.encode()).hexdigest()[:24]}"
+            db.execute(
+                """
+                INSERT INTO promotions
+                (promotion_id, generation, model_id, previous_model_id, artifact_sha256,
+                 validation_run_id, report_sha256, policy_sha256, reviewer, rationale, approved_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    promotion_id,
+                    next_generation,
+                    model_id,
+                    current_model_id,
+                    bundle.artifact_sha256,
+                    report.validation_run_id,
+                    report.report_sha256,
+                    policy.policy_sha256,
+                    reviewer.strip(),
+                    rationale.strip(),
+                    approved,
+                ),
+            )
+        return ChampionSnapshot(
+            model_id=model_id,
+            artifact_sha256=bundle.artifact_sha256,
+            generation=next_generation,
             bundle=bundle,
         )

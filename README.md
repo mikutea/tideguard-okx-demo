@@ -2,31 +2,47 @@
 
 [![Offline checks](https://github.com/mikutea/tideguard-okx-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/mikutea/tideguard-okx-demo/actions/workflows/ci.yml)
 
-一个只连接 **OKX 模拟盘** 的本地现货研究终端。程序默认处于观察模式；正常重启不保留下单授权，持久急停或未决订单则继续保持锁定。原始 API Key、Secret 与 Passphrase 只由 Windows Credential Manager 保存，不进入前端、项目文件、SQLite 或日志；SQLite 仅保存 API Key 与 OKX UID 的不可逆 SHA-256 身份指纹，用于阻止换账户核对订单。
+Tideguard 是一个仅连接 **OKX 模拟盘** 的 Windows 本地现货量化终端。v0.3 提供常驻后台、定时训练、未来影子验证、Codex 监督晋级、IOC 自动入场、实际成交库存跟踪，以及止损、止盈和定时自动退出。
 
-当前版本同时提供手工下单底座与受控模型链：公共 K 线离线训练、带标签隔离和 embargo 的 walk-forward、内容寻址冻结模型、人工 champion 晋级，以及一次性的 OKX Demo 模型 BUY 入场试运行。训练结果不等于未来收益，模型不能绕过确定性风控。
+它的目标是持续寻找并验证更稳健的候选模型，而不是承诺收益。模型不能在线改代码、风险阈值、交易品种或资金规模；每次更迭都产生新的冻结 JSON artifact，只有通过样本外、未来 shadow、相对 champion 改善和 Codex 内容哈希审查后，才可影响未来订单。
 
-## 安全边界
+## 固定安全边界
 
-- REST 主机固定为 `https://openapi.okx.com`，所有请求强制携带 `x-simulated-trading: 1`。
-- 交易品种固定为 `BTC-USDT`，交易模式固定为 `cash`，首版只接受限价现货单。
-- 前端不能传入 API 路径、交易模式、客户端订单号或环境标志。
-- 下单采用 `预检 → 明确确认 → 提交`；服务端重启后回到观察模式。
-- 每次限时授权绑定同一组 API Key 与 OKX 账户 UID；预检、提交、回查、急停与复位必须保持身份一致。
-- SQLite 事务保证同一运行状态只能派发一个账户身份的潜在订单；多账户或未知身份状态会保持急停锁定。
-- 当前部署模型限定为单个后端实例、单个 Uvicorn worker；不要并行启动多个 Tideguard 服务进程共享同一账户。
-- 私有请求超时不会盲目重试下单，而是按 `clOrdId` 查询并锁定等待核对。
-- 未决订单只有在同一账户逐笔查询且确认进入终态后，才允许解除急停。
-- 急停只阻止新单并尝试撤销本程序挂单，不会逆转已成交结果。
-- 本地服务仅监听 `127.0.0.1`。
-- 模型自动执行默认关闭；只有通过样本外门槛、人工逐字确认晋级、已启用演练且再次逐字授权短时 permit 后才会运行。
-- v0.2 自动许可最长 10 分钟、仅允许 1 笔、总名义额最多 10 USDT，并硬拒绝 SELL；它只做一次 Demo BUY 入场，不会自动退出，成交后的平仓需人工处理。未知提交结果不自动重试。
+- 所有交易请求固定发送到 `https://openapi.okx.com`，并强制携带 `x-simulated-trading: 1`；没有正式盘切换路径。
+- 只允许 `BTC-USDT / SPOT / cash`，零杠杆、无转账和提现端点。
+- 自动订单固定为限价 IOC；提交响应不能代替逐笔终态查询。
+- 每次自动入场名义额固定 10 USDT，同时最多一个模型持仓，每个 UTC 日最多三次入场。
+- SELL 只能使用 Tideguard 按 OKX 实际累计成交和费用计算出的模型净库存，不能卖出账户原有 BTC。
+- 自动止损 1.5%、止盈 2.5%、目标持有 12 根 5 分钟 K 线；验证和未来 shadow 使用相同的保守 bracket 语义及 24 bps 双边压力成本。
+- 未知下单结果、账户身份变化、订单回显不一致、审计损坏或不可交易残余会触发持久急停和人工核对，未知提交绝不自动重试。
+- 用户关闭长期 Demo master 后立即禁止新开仓；已确认属于模型的持仓仍进入退出管理。
+- Codex 的监督授权只绑定一笔订单、一个用途和一个决策 ID，不能被浏览器手工单或旧预检借用。
+- 原始 API Key、Secret 和 Passphrase 仅存入 Windows Credential Manager；SQLite 只保存不可逆的 API Key/OKX UID 身份指纹。
+- 本地服务只监听 `127.0.0.1:8791`，并强制单后端实例、单 Uvicorn worker。
 
-> 这是模拟盘测试程序，不是盈利承诺、投资建议或实盘代炒工具。
+> 这是模拟盘研究和工程验证软件，不是盈利承诺、投资建议或实盘代炒工具。
 
-## 快速开始（Windows PowerShell）
+## Windows 桌面版
 
-前置条件：Python 3.11 或更高版本、Node.js 22 或更高版本，以及已可用的 Corepack。
+普通用户可从 [GitHub Releases](https://github.com/mikutea/tideguard-okx-demo/releases/latest) 下载 `Tideguard-Setup-*.exe`。安装器默认创建当前用户登录自启动的后台 daemon；关闭桌面窗口不会停止训练、shadow 或已有持仓退出。安装器不会自动启用 Demo master，也不会打包任何凭证或本地数据库。
+
+开始菜单提供三个入口：
+
+- **Tideguard**：打开桌面界面；
+- **Tideguard 凭证管理**：把 OKX Demo 凭证写入当前用户的 Windows Credential Manager；
+- **停止 Tideguard 后台服务**：停止常驻 daemon。
+
+源码构建发行包：
+
+```powershell
+.\packaging\build-release.ps1
+```
+
+产物采用 PyInstaller `onedir` 和 Inno Setup，详见 [打包说明](packaging/README.md)。
+
+## 从源码运行
+
+前置条件：Python 3.11、Node.js 22 和 Corepack。
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -35,31 +51,33 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\run.ps1
 ```
 
-然后打开 <http://127.0.0.1:8791>。`5173` 只用于运行 `.\scripts\run-dev.ps1` 时的前端开发服务器。
+源码入口使用项目根目录下已忽略的 `.local-data\`；安装版使用 `%LOCALAPPDATA%\Tideguard\`。原始秘密不得粘贴到聊天、截图或项目文件。
 
-凭证设置命令会在本机终端中逐项隐藏输入。不要把 API Key、Secret 或 Passphrase 粘贴到聊天、截图或项目文件中。
+## 长期模型流水线
 
-在其他地方“已保存”的凭证不会被本程序自动导入；请只在本机项目根目录运行上面的隐藏输入命令。
+后台每天从 OKX 公共接口获取 10,000 根已完成且连续的 `BTC-USDT 5m` K 线，训练三组确定性的线性逻辑 challenger。当前基线故意使用严格 JSON 和纯数据权重，而不加载来自网络的 `pickle`、`joblib` 或“高收益模型”。
 
-## Windows 桌面版
+晋级链为：
 
-普通用户可从 [GitHub Releases](https://github.com/mikutea/tideguard-okx-demo/releases/latest) 下载 `Tideguard-Setup-*.exe` 一键安装，或使用便携 ZIP。桌面版使用 WebView2 打开并独占固定的 `127.0.0.1:8791`，从而与官方源码启动入口互斥；原始凭证仍只保存到 Windows Credential Manager。
-
-安装完成后可从开始菜单打开 **Tideguard 凭证管理**，无需 Python 或控制台即可设置/删除当前 Windows 用户的 OKX Demo 凭证。
-
-从源码构建安装器：
-
-```powershell
-.\packaging\build-release.ps1
+```text
+定时训练
+  → label horizon + embargo 的外层 walk-forward
+  → long/flat、bracket、非重叠资本、24 bps 成本诊断
+  → 至少 7 天且 20 个结算 BUY 的未来 shadow
+  → 相对当前 champion 的 OOS 改善门
+  → Codex 脱敏证据审查与 generation CAS
+  → 最长 24 小时执行 lease
+  → 10 USDT Demo canary
+  → 净成本结果监测、暂停或回滚
 ```
 
-构建产物是 PyInstaller `onedir` + Inno Setup 安装器，不承诺真正的“单文件免解压”运行；这样更容易验证原生依赖并减少启动时临时释放风险。详见 [打包说明](packaging/README.md)。
+Codex Supervisor 命令只输出/接收模型哈希、验证指标和状态，不读取 OKX Secret：
 
-## 模型实验室
+```powershell
+.\.venv\Scripts\python.exe -m okx_demo_lab.cli supervisor review
+```
 
-在“策略实验室”中点击“训练新候选”只会下载 OKX 公共、已完成的 `BTC-USDT 5m` K 线并在本机训练，不读取私有凭证。候选验证采用固定周期、long-only、持仓期不重叠的样本外研究诊断：只在 flat 时计一次 BUY，按固定 horizon 的理论退出收益和双边成本结算；SELL 不产生空头收益。该诊断是研究用的理论 round-trip，不是部署后收益，也与 v0.2 运行时“只入场、不自动退出”的单次 Demo BUY 语义不同。候选满足门槛后，仍要人工填写审阅说明并输入确认短语，才可成为 champion。
-
-当前内置模型是可审计、严格 JSON 的线性逻辑基线，用于跑通可复现训练和安全执行契约；它不是“高收益模型”。可选 FreqAI 边界只允许独立 dry-run 进程通过 localhost 提供冻结信号；Freqtrade/FreqAI 不随安装器捆绑，也不持有 OKX 凭证。详见 [模型架构](docs/ML-ARCHITECTURE.md)。
+旧版浏览器人工晋级和一次性 BUY permit 已返回 `410 Gone`。Freqtrade/FreqAI 不随安装器捆绑；如以后接入，只能作为独立 localhost 公共信号源，不能持有 Tideguard 凭证或直接下单。详细契约见 [长期自动量化架构](docs/AUTONOMY-ARCHITECTURE.md) 与 [模型架构](docs/ML-ARCHITECTURE.md)。
 
 ## 验证
 
@@ -67,27 +85,17 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\check.ps1
 ```
 
-该命令运行后端单元测试、前端类型检查与生产构建，并扫描项目中不应出现的凭证字段赋值。它不会调用私有 OKX API，也不会发出订单。
+该命令执行后端测试、前端类型检查、生产构建和秘密扫描，不调用 OKX 私有 API，也不发订单。模拟盘端到端测试只有在用户显式启用 master 后才开始。
 
 ## 目录
 
 ```text
-backend/   FastAPI、OKX Demo 客户端、确定性风控、SQLite 审计
-frontend/  React + Vite 响应式界面
-desktop/   pywebview 桌面宿主与固定回环端口启动器
-packaging/ PyInstaller、Inno Setup 与 Release 构建
-scripts/   Windows 安装、启动与检查脚本
-docs/      视觉概念与设计说明
+backend/   FastAPI、OKX Demo 客户端、风控、模型、监督与 SQLite 状态
+frontend/  React + Vite 响应式桌面界面
+desktop/   pywebview 桌面宿主、后台 daemon 与凭证管理窗
+packaging/ PyInstaller、Inno Setup 和 GitHub Release 构建
+scripts/   Windows 安装、启动与离线检查脚本
+docs/      架构、验证和设计记录
 ```
 
-安装版运行时数据位于 `%LOCALAPPDATA%\Tideguard\`。源码 `run.ps1` / `run-dev.ps1` 为便于项目整体迁移，使用项目根目录下已忽略的 `.local-data\`；两者都不会进入 Git。
-
 公开仓库：<https://github.com/mikutea/tideguard-okx-demo>
-
-## 审计与验收材料
-
-- [GitHub AI 量化项目审计](docs/GITHUB-AUDIT.md)
-- [视觉保真记录](docs/FIDELITY-LEDGER.md)
-- [验证记录](docs/VERIFICATION.md)
-- [桌面端截图](docs/tideguard-desktop.png)
-- [移动端截图](docs/tideguard-mobile.png)

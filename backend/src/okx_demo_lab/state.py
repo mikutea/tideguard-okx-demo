@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import re
 from datetime import datetime, timedelta, timezone
 
 from .audit import AuditStore
@@ -20,11 +21,15 @@ class SafetyController:
         self._armed_until: datetime | None = None
         self._credential_fingerprint: str | None = None
         self._account_fingerprint: str | None = None
+        self._supervisor_decision_id: str | None = None
+        self._supervisor_purpose: str | None = None
 
     def _clear_arming(self) -> None:
         self._armed_until = None
         self._credential_fingerprint = None
         self._account_fingerprint = None
+        self._supervisor_decision_id = None
+        self._supervisor_purpose = None
 
     def _persistent_kill_active(self) -> bool:
         try:
@@ -92,6 +97,8 @@ class SafetyController:
             )
             self._credential_fingerprint = credential_fingerprint
             self._account_fingerprint = account_fingerprint
+            self._supervisor_decision_id = None
+            self._supervisor_purpose = None
         self.store.append(
             "safety.armed",
             {
@@ -102,6 +109,59 @@ class SafetyController:
             actor="user",
         )
         return self.status()
+
+    def arm_supervised(
+        self,
+        decision_id: str,
+        credential_fingerprint: str,
+        account_fingerprint: str,
+        *,
+        purpose: str,
+    ) -> dict[str, str | int | bool | None]:
+        """Create a short in-memory arm from a verified external supervisor lease.
+
+        The method is intentionally not exposed as an HTTP route.  The autonomy
+        coordinator must first validate the content-addressed Codex decision and
+        the account binding, while this controller keeps the final persistent
+        kill-latch check.
+        """
+
+        if not re.fullmatch(r"sup_[0-9a-f]{28}", decision_id):
+            raise SafetyError("Codex 监督决策标识无效。")
+        if purpose not in {"entry", "exit"}:
+            raise SafetyError("监督授权用途无效。")
+        if not credential_fingerprint or not account_fingerprint:
+            raise SafetyError("模拟账户身份未完成绑定。")
+        with self._lock:
+            if self._persistent_kill_active():
+                raise SafetyError("急停仍处于锁定状态。")
+            self._armed_until = datetime.now(timezone.utc) + timedelta(
+                seconds=POLICY.automation_arm_ttl_seconds
+            )
+            self._credential_fingerprint = credential_fingerprint
+            self._account_fingerprint = account_fingerprint
+            self._supervisor_decision_id = decision_id
+            self._supervisor_purpose = purpose
+        self.store.append(
+            "safety.supervisor_armed",
+            {
+                "decisionId": decision_id,
+                "purpose": purpose,
+                "ttlSeconds": POLICY.automation_arm_ttl_seconds,
+                "environment": "demo",
+                "identityBound": True,
+            },
+            actor="codex-supervisor",
+        )
+        return self.status()
+
+    def supervised_context(self) -> tuple[str, str] | None:
+        with self._lock:
+            if self.status()["mode"] != "armed":
+                return None
+            if self._supervisor_decision_id and self._supervisor_purpose:
+                return self._supervisor_decision_id, self._supervisor_purpose
+            return None
 
     def disarm(self, reason: str = "user") -> dict[str, str | int | bool | None]:
         with self._lock:

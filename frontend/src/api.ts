@@ -3,6 +3,7 @@ import type {
   AuditEvent,
   DemoOrder,
   MarketData,
+  LongRunStatus,
   MLStatus,
   PreviewResult,
   SystemStatus
@@ -110,5 +111,18 @@ export const api = {
       body: JSON.stringify(body)
     }),
   stopAutomation: () =>
-    request<Record<string, unknown>>("/api/v1/ml/automation/stop", { method: "POST" })
+    request<Record<string, unknown>>("/api/v1/ml/automation/stop", { method: "POST" }),
+  getAutonomyStatus: () => request<LongRunStatus>("/api/v1/autonomy/status"),
+  trainAutonomy: () =>
+    request<Record<string, unknown>>("/api/v1/autonomy/train", { method: "POST" }),
+  enableAutonomy: (confirmation: string) =>
+    request<LongRunStatus["state"]>("/api/v1/autonomy/master/enable", {
+      method: "POST",
+      body: JSON.stringify({ mode: "demo", confirmation })
+    }),
+  disableAutonomy: (reason: string) =>
+    request<LongRunStatus["state"]>("/api/v1/autonomy/master/disable", {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    })
 };

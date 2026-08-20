@@ -142,7 +142,10 @@ class AuditStore:
                     commit_key TEXT UNIQUE,
                     okx_ord_id TEXT,
                     credential_fingerprint TEXT,
-                    account_fingerprint TEXT
+                    account_fingerprint TEXT,
+                    authorization_kind TEXT NOT NULL DEFAULT 'manual',
+                    supervisor_decision_id TEXT,
+                    supervisor_purpose TEXT
                 );
                 """
             )
@@ -154,6 +157,14 @@ class AuditStore:
                 db.execute("ALTER TABLE intents ADD COLUMN credential_fingerprint TEXT")
             if "account_fingerprint" not in columns:
                 db.execute("ALTER TABLE intents ADD COLUMN account_fingerprint TEXT")
+            if "authorization_kind" not in columns:
+                db.execute(
+                    "ALTER TABLE intents ADD COLUMN authorization_kind TEXT NOT NULL DEFAULT 'manual'"
+                )
+            if "supervisor_decision_id" not in columns:
+                db.execute("ALTER TABLE intents ADD COLUMN supervisor_decision_id TEXT")
+            if "supervisor_purpose" not in columns:
+                db.execute("ALTER TABLE intents ADD COLUMN supervisor_purpose TEXT")
             timestamp = utc_now()
             db.execute(
                 "INSERT OR IGNORE INTO flags (name, value, updated_at) VALUES (?, ?, ?)",
@@ -304,15 +315,20 @@ class AuditStore:
                 """
                 INSERT INTO intents
                 (intent_id, created_at, expires_at, payload_json, decision_json, digest,
-                 cl_ord_id, status, credential_fingerprint, account_fingerprint)
+                 cl_ord_id, status, credential_fingerprint, account_fingerprint,
+                 authorization_kind, supervisor_decision_id, supervisor_purpose)
                 VALUES (:intent_id, :created_at, :expires_at, :payload_json, :decision_json,
                         :digest, :cl_ord_id, :status, :credential_fingerprint,
-                        :account_fingerprint)
+                        :account_fingerprint, :authorization_kind,
+                        :supervisor_decision_id, :supervisor_purpose)
                 """,
                 {
                     **record,
                     "credential_fingerprint": record.get("credential_fingerprint"),
                     "account_fingerprint": record.get("account_fingerprint"),
+                    "authorization_kind": record.get("authorization_kind", "manual"),
+                    "supervisor_decision_id": record.get("supervisor_decision_id"),
+                    "supervisor_purpose": record.get("supervisor_purpose"),
                 },
             )
 

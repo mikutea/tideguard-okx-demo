@@ -237,6 +237,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.018); }
 .empty-lab { padding: 23px; display: flex; align-items: center; gap: 17px; color: var(--text-muted); }
 .empty-lab h3 { margin: 0 0 5px; color: var(--text-soft); font-size: 13px; }
 .empty-lab p { margin: 0; font-size: 10px; }
+.empty-lab.compact { min-height: 112px; padding: 14px 0; }
 .lab-page { max-width: 1380px; }
 .lab-engine { margin-left: auto; min-width: 230px; padding: 13px 15px; border: 1px solid #315a57; border-radius: 8px; background: rgba(40, 93, 88, 0.16); }
 .lab-engine span, .lab-engine small { display: block; }
@@ -245,6 +246,12 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.018); }
 .lab-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .lab-card { min-width: 0; padding: 22px; }
 .lab-card > p { min-height: 40px; margin: 12px 0 16px; color: var(--text-soft); font-size: 10px; line-height: 1.7; }
+.runtime-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 42px; margin: 0 0 14px; padding: 0 11px; border: 1px solid var(--border-soft); border-radius: 6px; background: rgba(5, 8, 11, 0.24); }
+.runtime-line span { color: var(--text-muted); font-size: 8px; }
+.runtime-line strong { color: var(--text-soft); font-size: 9px; text-align: right; }
+.position-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 13px 0 18px; }
+.position-grid span { min-width: 0; padding: 9px; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text-muted); font-size: 7px; }
+.position-grid strong { display: block; margin-top: 5px; color: var(--text-soft); font-size: 9px; overflow: hidden; text-overflow: ellipsis; }
 .lab-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 15px; }
 .lab-card-head > svg { color: var(--teal); }
 .lab-card h2 { margin: 5px 0 0; font-size: 16px; }
@@ -397,6 +404,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.018); }
   .model-row { grid-template-columns: 1fr; gap: 12px; }
   .metric-grid, .gate-row { grid-column: auto; }
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
+  .position-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .model-row > .button { justify-self: start; }
   .freqai-note { grid-template-columns: 24px 1fr; }
   .freqai-note > span { grid-column: 2; justify-self: start; }

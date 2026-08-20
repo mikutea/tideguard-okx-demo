@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 
 from .audit import AuditStore, IntentIdentityConflict, utc_now
 from .config import POLICY
@@ -32,8 +32,31 @@ LIVE_OKX_ORDER_STATES = frozenset({"live", "partially_filled"})
 CAA_MIN_INTERVAL_SECONDS = 1.05
 
 
+class CommitBlockedBeforeDispatch(ValueError):
+    """A final in-process gate proved the HTTP order was never sent."""
+
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _intent_digest(
+    intent_id: str,
+    payload: dict[str, Any],
+    decision: dict[str, Any],
+    authorization: dict[str, Any],
+) -> str:
+    return hashlib.sha256(
+        _json(
+            {
+                "authorization": authorization,
+                "decision": decision,
+                "intent": intent_id,
+                "payload": payload,
+            }
+        ).encode()
+    ).hexdigest()
 
 
 def _account_fingerprint(config: list[dict[str, Any]]) -> str:
@@ -204,6 +227,83 @@ class TradingService:
                     self.safety.abort_arm_in_memory()
                 raise
 
+    async def current_identity_binding(self) -> tuple[str, str]:
+        """Return non-secret fingerprints for the currently configured Demo account."""
+
+        self._require_audit_integrity()
+        if not credentials_configured():
+            raise ValueError("请先在 Windows Credential Manager 配置模拟盘凭证")
+        credential_fingerprint = self.client.current_credential_fingerprint()
+        config = await self.client.get_account_config(
+            expected_credential_fingerprint=credential_fingerprint
+        )
+        return credential_fingerprint, _account_fingerprint(config)
+
+    async def arm_supervised(
+        self,
+        decision_id: str,
+        expected_binding: tuple[str, str],
+        *,
+        purpose: str,
+    ) -> dict[str, Any]:
+        """Create a short order-dispatch arm after the coordinator verifies Codex.
+
+        This method has no HTTP route.  It revalidates the Demo credential and
+        OKX UID binding itself, refuses a pending kill signal, and establishes a
+        fresh CAA lease before returning.
+        """
+
+        async with self._trade_lock:
+            self._require_audit_integrity()
+            if self._kill_requested.is_set():
+                raise SafetyError("存在未复位的急停信号，监督授权被拒绝")
+            current_binding = await self.current_identity_binding()
+            if not hmac.compare_digest(current_binding[0], expected_binding[0]) or not hmac.compare_digest(
+                current_binding[1], expected_binding[1]
+            ):
+                self._engage_kill("Codex 监督账户身份不匹配", actor="system")
+                raise CredentialIdentityError("当前模拟账户与长期授权绑定不一致")
+            potential_bindings = set(self.store.potential_order_identity_bindings())
+            if potential_bindings and potential_bindings != {expected_binding}:
+                self._engage_kill("Codex 监督检测到跨账户潜在订单", actor="system")
+                raise CredentialIdentityError("存在其他账户身份的潜在订单")
+            self._deadman_valid_until = None
+            self._exchange_deadman_valid_until = None
+            try:
+                state = self.safety.arm_supervised(
+                    decision_id,
+                    current_binding[0],
+                    current_binding[1],
+                    purpose=purpose,
+                )
+                async with self._caa_lock:
+                    self._caa_outcome_unknown = True
+                    await self._write_caa(
+                        POLICY.deadman_seconds,
+                        current_binding[0],
+                    )
+                    try:
+                        self._record_deadman_success()
+                    finally:
+                        self._caa_outcome_unknown = False
+                if self._kill_requested.is_set() or self.safety.status()["mode"] != "armed":
+                    raise SafetyError("监督授权期间触发急停")
+                return state
+            except BaseException:
+                self._signal_kill()
+                try:
+                    if self.store.get_flag("kill_active") != "true":
+                        self._engage_kill(
+                            "Codex 监督授权初始化失败",
+                            actor="system",
+                            already_signaled=True,
+                        )
+                    else:
+                        self.safety.abort_arm_in_memory()
+                except Exception:
+                    self.safety.abort_arm_in_memory()
+                raise
+
     def _active_identity(self) -> tuple[str, str]:
         credential_fingerprint, account_fingerprint = self.safety.armed_identity()
         try:
@@ -323,6 +423,92 @@ class TradingService:
         )
         return [self._safe_order(order) for order in orders if order.get("tag") == "tideguarddemo"]
 
+    async def inspect_intent_order(
+        self,
+        intent_id: str,
+        expected_binding: tuple[str, str],
+    ) -> dict[str, Any]:
+        """Resolve one Tideguard intent to a verified OKX order without arming."""
+
+        record = self.store.get_intent(intent_id)
+        if record is None or not record.get("commit_key"):
+            raise ValueError("订单意图不存在或尚未派发")
+        if not hmac.compare_digest(
+            str(record.get("credential_fingerprint") or ""), expected_binding[0]
+        ) or not hmac.compare_digest(
+            str(record.get("account_fingerprint") or ""), expected_binding[1]
+        ):
+            self._engage_kill("自动订单回查账户身份不匹配", actor="system")
+            raise CredentialIdentityError("订单意图不属于长期授权账户")
+        current_binding = await self.current_identity_binding()
+        if not hmac.compare_digest(current_binding[0], expected_binding[0]) or not hmac.compare_digest(
+            current_binding[1], expected_binding[1]
+        ):
+            self._engage_kill("自动订单回查期间账户身份变化", actor="system")
+            raise CredentialIdentityError("当前模拟账户身份已变化")
+        cl_ord_id = str(record.get("cl_ord_id") or "").strip()
+        known_ord_id = str(record.get("okx_ord_id") or "").strip()
+        if not cl_ord_id:
+            self._engage_kill("自动订单缺少 clOrdId", actor="system")
+            raise OkxClientError("订单意图缺少 clOrdId")
+        found = await self.client.get_order(
+            "BTC-USDT",
+            cl_ord_id,
+            expected_credential_fingerprint=expected_binding[0],
+        )
+        if len(found) != 1:
+            raise OkxClientError("OKX 未唯一确认自动订单")
+        order = found[0]
+        draft = OrderDraft.model_validate_json(record["payload_json"])
+        ord_id = str(order.get("ordId") or "").strip()
+        state = str(order.get("state") or "").strip().lower()
+        if (
+            not ord_id
+            or str(order.get("clOrdId") or "").strip() != cl_ord_id
+            or str(order.get("tag") or "") != "tideguarddemo"
+            or str(order.get("instId") or "") != draft.instId
+            or str(order.get("side") or "") != draft.side
+            or str(order.get("ordType") or "") != draft.ordType
+            or (known_ord_id and not hmac.compare_digest(ord_id, known_ord_id))
+        ):
+            self._engage_kill("自动订单回显身份不一致", actor="system")
+            raise OkxClientError("OKX 自动订单回显不匹配")
+        if state not in TERMINAL_OKX_ORDER_STATES | LIVE_OKX_ORDER_STATES:
+            raise OkxClientError("OKX 自动订单状态未知")
+        if state in TERMINAL_OKX_ORDER_STATES:
+            self.store.update_intent(
+                intent_id,
+                status="terminal_verified",
+                okx_ord_id=ord_id,
+            )
+            self.store.append(
+                "order.terminal_verified",
+                {
+                    "intentId": intent_id,
+                    "clOrdId": cl_ord_id,
+                    "ordId": ord_id,
+                    "state": state,
+                    "actor": "autonomy",
+                },
+                actor="system",
+                correlation_id=intent_id,
+            )
+        return {
+            "intentId": intent_id,
+            "clOrdId": cl_ord_id,
+            "ordId": ord_id,
+            "instId": draft.instId,
+            "side": draft.side,
+            "ordType": draft.ordType,
+            "requestedSize": str(draft.size),
+            "filledSize": str(order.get("accFillSz") or "0"),
+            "averagePrice": str(order.get("avgPx") or ""),
+            "state": state,
+            "fee": str(order.get("fee") or "0"),
+            "feeCurrency": str(order.get("feeCcy") or ""),
+            "updatedAt": order.get("uTime"),
+        }
+
     @staticmethod
     def _safe_order(order: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -358,7 +544,25 @@ class TradingService:
         account = account_context(balance_data, True)
         return bundle["ticker"], bundle["instrument"], account, len(pending)
 
-    async def preview(self, draft: OrderDraft) -> dict[str, Any]:
+    async def preview(
+        self,
+        draft: OrderDraft,
+        *,
+        supervisor_decision_id: str | None = None,
+        supervisor_purpose: str | None = None,
+    ) -> dict[str, Any]:
+        supervised_context = self.safety.supervised_context()
+        if supervised_context is not None:
+            supplied_context = (supervisor_decision_id, supervisor_purpose)
+            if supplied_context != supervised_context:
+                raise SafetyError(
+                    "Codex 监督授权不能创建浏览器或其他用途的订单预检"
+                )
+            authorization_kind = "supervisor"
+        else:
+            if supervisor_decision_id is not None or supervisor_purpose is not None:
+                raise SafetyError("当前授权不是 Codex 监督授权")
+            authorization_kind = "manual"
         credential_fingerprint, account_fingerprint = self._active_identity()
         try:
             ticker, instrument, account, open_orders = await self._risk_inputs(
@@ -381,9 +585,12 @@ class TradingService:
         expires_at = created_at + timedelta(seconds=POLICY.preview_ttl_seconds)
         payload = draft.model_dump(mode="json")
         decision_data = decision.model_dump(mode="json")
-        digest = hashlib.sha256(
-            _json({"intent": intent_id, "payload": payload, "decision": decision_data}).encode()
-        ).hexdigest()
+        authorization = {
+            "kind": authorization_kind,
+            "supervisorDecisionId": supervisor_decision_id,
+            "supervisorPurpose": supervisor_purpose,
+        }
+        digest = _intent_digest(intent_id, payload, decision_data, authorization)
         self.store.save_intent(
             {
                 "intent_id": intent_id,
@@ -396,6 +603,9 @@ class TradingService:
                 "status": "previewed" if decision.allowed else "rejected",
                 "credential_fingerprint": credential_fingerprint,
                 "account_fingerprint": account_fingerprint,
+                "authorization_kind": authorization_kind,
+                "supervisor_decision_id": supervisor_decision_id,
+                "supervisor_purpose": supervisor_purpose,
             }
         )
         self.store.append(
@@ -409,7 +619,7 @@ class TradingService:
                 "reasonCodes": decision.reasonCodes,
                 "policyVersion": decision.policyVersion,
             },
-            actor="user",
+            actor="codex-supervisor" if authorization_kind == "supervisor" else "user",
             correlation_id=intent_id,
         )
         return {
@@ -510,11 +720,30 @@ class TradingService:
 
         return {"intentId": intent_id, "status": "manual_review", "ordId": None, "replayed": False}
 
-    async def commit(self, intent_id: str, digest: str, idempotency_key: str) -> dict[str, Any]:
+    async def commit(
+        self,
+        intent_id: str,
+        digest: str,
+        idempotency_key: str,
+        *,
+        additional_dispatch_guard: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         async with self._trade_lock:
-            return await self._commit_locked(intent_id, digest, idempotency_key)
+            return await self._commit_locked(
+                intent_id,
+                digest,
+                idempotency_key,
+                additional_dispatch_guard=additional_dispatch_guard,
+            )
 
-    async def _commit_locked(self, intent_id: str, digest: str, idempotency_key: str) -> dict[str, Any]:
+    async def _commit_locked(
+        self,
+        intent_id: str,
+        digest: str,
+        idempotency_key: str,
+        *,
+        additional_dispatch_guard: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         record = self.store.get_intent(intent_id)
         if record is None:
             raise ValueError("预检不存在")
@@ -529,7 +758,41 @@ class TradingService:
             raise ValueError("该预检已使用另一个幂等键提交")
         if record["status"] != "previewed":
             raise ValueError("只有通过风控且未使用的预检才能提交")
-        if record["digest"] != digest:
+        authorization_kind = str(record.get("authorization_kind") or "manual")
+        supervisor_context = self.safety.supervised_context()
+        if authorization_kind == "supervisor":
+            expected_context = (
+                str(record.get("supervisor_decision_id") or ""),
+                str(record.get("supervisor_purpose") or ""),
+            )
+            if supervisor_context != expected_context:
+                raise ValueError("Codex 监督订单与当前短时授权不匹配")
+        elif authorization_kind == "manual":
+            if supervisor_context is not None:
+                raise ValueError("Codex 监督授权不能提交人工订单预检")
+        else:
+            self._engage_kill("订单授权类型损坏", actor="system")
+            raise ValueError("订单授权类型无效；已触发急停")
+        try:
+            canonical_payload = json.loads(str(record["payload_json"]))
+            canonical_decision = json.loads(str(record["decision_json"]))
+        except (json.JSONDecodeError, TypeError) as exc:
+            self._engage_kill("订单预检持久状态损坏", actor="system")
+            raise ValueError("订单预检无法复核；已触发急停") from exc
+        expected_digest = _intent_digest(
+            intent_id,
+            canonical_payload,
+            canonical_decision,
+            {
+                "kind": authorization_kind,
+                "supervisorDecisionId": record.get("supervisor_decision_id"),
+                "supervisorPurpose": record.get("supervisor_purpose"),
+            },
+        )
+        if not hmac.compare_digest(str(record["digest"]), expected_digest):
+            self._engage_kill("订单预检摘要持久状态不一致", actor="system")
+            raise ValueError("订单预检完整性校验失败；已触发急停")
+        if not hmac.compare_digest(str(record["digest"]), digest):
             raise ValueError("预检摘要不匹配")
         expires_at = datetime.fromisoformat(record["expires_at"].replace("Z", "+00:00"))
         if datetime.now(timezone.utc) >= expires_at:
@@ -598,6 +861,16 @@ class TradingService:
             actor="user",
             correlation_id=intent_id,
         )
+        def final_dispatch_guard() -> None:
+            self._dispatch_guard()
+            if additional_dispatch_guard is not None:
+                try:
+                    additional_dispatch_guard()
+                except BaseException as exc:
+                    raise DispatchBlockedError(
+                        "additional order dispatch gate rejected the request"
+                    ) from exc
+
         try:
             result = await self.client.place_order(
                 inst_id=draft.instId,
@@ -607,7 +880,7 @@ class TradingService:
                 size=str(draft.size),
                 cl_ord_id=record["cl_ord_id"],
                 expected_credential_fingerprint=credential_fingerprint,
-                dispatch_guard=self._dispatch_guard,
+                dispatch_guard=final_dispatch_guard,
             )
             ord_id = str(result.get("ordId", "")) or None
             self.store.update_intent(intent_id, status="accepted", okx_ord_id=ord_id)
@@ -639,7 +912,9 @@ class TradingService:
                 {"intentId": intent_id},
                 correlation_id=intent_id,
             )
-            raise ValueError("订单在发送前被急停或授权状态阻止") from exc
+            raise CommitBlockedBeforeDispatch(
+                "订单在发送前被急停或授权状态阻止"
+            ) from exc
         except CredentialIdentityError:
             self.store.update_intent(intent_id, status="credential_mismatch")
             self._engage_kill("下单前模拟盘凭证身份发生变化", actor="system")

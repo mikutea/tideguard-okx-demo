@@ -48,7 +48,7 @@ def app_data_dir() -> Path:
 
 @dataclass(frozen=True)
 class RiskPolicy:
-    policy_version: str = "demo-v1"
+    policy_version: str = "demo-v2-autonomy"
     stale_market_seconds: int = 8
     max_price_deviation: Decimal = Decimal("0.015")
     max_order_notional_usdt: Decimal = Decimal("25")
@@ -56,6 +56,7 @@ class RiskPolicy:
     max_open_orders: int = 3
     preview_ttl_seconds: int = 45
     arm_ttl_seconds: int = 600
+    automation_arm_ttl_seconds: int = 90
     request_expiry_ms: int = 4_000
     deadman_seconds: int = 20
     deadman_local_lease_seconds: int = 12

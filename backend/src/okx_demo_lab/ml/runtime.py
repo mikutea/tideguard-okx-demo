@@ -180,7 +180,7 @@ class MLCoordinator:
             if len(raw) < candle_limit:
                 raise MLRuntimeError("OKX did not return the requested completed candle history")
             now = _utc_now()
-            revision = os.environ.get("TIDEGUARD_BUILD_REVISION", "tideguard-0.2.0")
+            revision = os.environ.get("TIDEGUARD_BUILD_REVISION", "tideguard-0.3.0")
             result = await asyncio.to_thread(
                 train_and_register_candidate,
                 raw,

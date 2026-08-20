@@ -15,9 +15,11 @@ from .strategy import (
 
 
 LEGACY_VALIDATION_SCHEMA_VERSION = "tideguard.walk-forward.v1"
-VALIDATION_SCHEMA_VERSION = "tideguard.walk-forward.v2"
+LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION = "tideguard.walk-forward.v2"
+VALIDATION_SCHEMA_VERSION = "tideguard.walk-forward.v3"
 LEGACY_EVALUATION_MODE = "directional-overlapping-long-short"
-LONG_ONLY_EVALUATION_MODE = "long-only-fixed-horizon-non-overlapping"
+LEGACY_LONG_ONLY_EVALUATION_MODE = "long-only-fixed-horizon-non-overlapping"
+LONG_ONLY_EVALUATION_MODE = "long-only-bracket-fixed-horizon-non-overlapping"
 
 
 class ValidationError(ValueError):
@@ -151,6 +153,8 @@ class TrainingConfig:
     buy_threshold: float = 0.60
     sell_threshold: float = 0.40
     round_trip_cost_bps: float = 12.0
+    stop_loss_fraction: float = 0.015
+    take_profit_fraction: float = 0.025
 
     def __post_init__(self) -> None:
         values = (
@@ -159,6 +163,8 @@ class TrainingConfig:
             self.buy_threshold,
             self.sell_threshold,
             self.round_trip_cost_bps,
+            self.stop_loss_fraction,
+            self.take_profit_fraction,
         )
         if any(not math.isfinite(float(value)) for value in values):
             raise ValidationError("training configuration must be finite")
@@ -172,6 +178,10 @@ class TrainingConfig:
             raise ValidationError("signal thresholds must straddle 0.5")
         if not 0 < self.round_trip_cost_bps <= 1_000:
             raise ValidationError("validation must include positive bounded costs")
+        if not 0 < self.stop_loss_fraction <= 0.05:
+            raise ValidationError("stop loss is outside the supported range")
+        if not 0 < self.take_profit_fraction <= 0.10:
+            raise ValidationError("take profit is outside the supported range")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -181,6 +191,8 @@ class TrainingConfig:
             "learning_rate": float(self.learning_rate),
             "round_trip_cost_bps": float(self.round_trip_cost_bps),
             "sell_threshold": float(self.sell_threshold),
+            "stop_loss_fraction": float(self.stop_loss_fraction),
+            "take_profit_fraction": float(self.take_profit_fraction),
         }
 
     @property
@@ -404,14 +416,15 @@ class ValidationReport:
                 raise ValidationError("validation hashes must be lowercase sha256")
         if self.schema_version not in {
             LEGACY_VALIDATION_SCHEMA_VERSION,
+            LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION,
             VALIDATION_SCHEMA_VERSION,
         } or not self.folds:
             raise ValidationError("unsupported or empty validation report")
-        expected_mode = (
-            LONG_ONLY_EVALUATION_MODE
-            if self.schema_version == VALIDATION_SCHEMA_VERSION
-            else LEGACY_EVALUATION_MODE
-        )
+        expected_mode = {
+            LEGACY_VALIDATION_SCHEMA_VERSION: LEGACY_EVALUATION_MODE,
+            LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION: LEGACY_LONG_ONLY_EVALUATION_MODE,
+            VALIDATION_SCHEMA_VERSION: LONG_ONLY_EVALUATION_MODE,
+        }[self.schema_version]
         if self.evaluation_mode != expected_mode:
             raise ValidationError("validation evaluation semantics do not match the schema")
         if self.oos_rows != sum(fold.test_rows for fold in self.folds):
@@ -449,7 +462,7 @@ class ValidationReport:
             "walk_forward_spec": self.walk_forward_spec.to_dict(),
             "worst_fold_net_return": self.worst_fold_net_return,
         }
-        if self.schema_version == VALIDATION_SCHEMA_VERSION:
+        if self.schema_version != LEGACY_VALIDATION_SCHEMA_VERSION:
             value["evaluation_mode"] = self.evaluation_mode
         return value
 
@@ -482,7 +495,10 @@ class ValidationReport:
         if not isinstance(value, dict):
             raise ValidationError("validation report has missing or unexpected fields")
         schema_version = str(value.get("schema_version", ""))
-        if schema_version == VALIDATION_SCHEMA_VERSION:
+        if schema_version in {
+            VALIDATION_SCHEMA_VERSION,
+            LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION,
+        }:
             expected = base_expected | {"evaluation_mode"}
             evaluation_mode = str(value.get("evaluation_mode", ""))
         elif schema_version == LEGACY_VALIDATION_SCHEMA_VERSION:

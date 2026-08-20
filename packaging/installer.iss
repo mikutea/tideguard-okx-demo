@@ -2,7 +2,7 @@
 #define MyAppPublisher "Tideguard"
 #define MyAppExeName "Tideguard.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.0"
+  #define MyAppVersion "0.3.0"
 #endif
 #define MyAppSourceDir GetEnv("TIDEGUARD_PACKAGE_SOURCE")
 #if MyAppSourceDir == ""
@@ -42,6 +42,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加快捷方式："; Flags: unchecked
+Name: "autostart"; Description: "登录 Windows 后启动 Tideguard 后台服务"; GroupDescription: "长期运行："
 
 [Files]
 Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -53,10 +54,16 @@ Type: filesandordirs; Name: "{app}\_internal"
 [Icons]
 Name: "{group}\Tideguard"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\Tideguard 凭证管理"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--credentials"
+Name: "{group}\停止 Tideguard 后台服务"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--stop-daemon"
 Name: "{autodesktop}\Tideguard"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{userstartup}\Tideguard 后台服务"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--daemon"; WorkingDir: "{app}"; Tasks: autostart
 
 [Run]
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--daemon"; Description: "启动 Tideguard 后台服务"; Flags: nowait runhidden postinstall skipifsilent; Tasks: autostart
 Filename: "{app}\{#MyAppExeName}"; Description: "启动 Tideguard"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--stop-daemon"; Flags: runhidden waituntilterminated; RunOnceId: "StopTideguardDaemon"
 
 [Code]
 const
@@ -92,4 +99,34 @@ begin
     RaiseException(Format(
       'Microsoft Edge WebView2 Runtime 安装失败（退出代码 %d）。', [ResultCode]
     ));
+end;
+
+function StopExistingDaemon(): Boolean;
+var
+  ResultCode: Integer;
+  ExePath: String;
+begin
+  Result := True;
+  ExePath := ExpandConstant('{app}\{#MyAppExeName}');
+  if FileExists(ExePath) then
+  begin
+    if not Exec(ExePath, '--stop-daemon', '', SW_HIDE,
+      ewWaitUntilTerminated, ResultCode) then
+      Result := False;
+    Sleep(750);
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  if StopExistingDaemon() then
+    Result := ''
+  else
+    Result := '无法停止现有 Tideguard 后台服务，请稍后重试。';
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  StopExistingDaemon();
+  Result := True;
 end;

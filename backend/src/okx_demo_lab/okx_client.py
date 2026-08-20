@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -51,13 +52,21 @@ class OkxClient:
         *,
         credentials_provider: Callable[[], Credentials | None] = get_credentials,
         transport: httpx.AsyncBaseTransport | None = None,
+        history_page_delay_seconds: float | None = None,
     ):
         self._credentials_provider = credentials_provider
         self._client = httpx.AsyncClient(
             base_url=OKX_BASE_URL,
             timeout=httpx.Timeout(8.0, connect=5.0),
             transport=transport,
-            headers={"User-Agent": "Tideguard/0.1 demo-only"},
+            headers={"User-Agent": "Tideguard/0.3 demo-only"},
+        )
+        self._history_page_delay_seconds = (
+            0.0
+            if transport is not None and history_page_delay_seconds is None
+            else 0.11
+            if history_page_delay_seconds is None
+            else max(0.0, min(float(history_page_delay_seconds), 2.0))
         )
 
     async def close(self) -> None:
@@ -267,13 +276,13 @@ class OkxClient:
     ) -> list[list[Any]]:
         if inst_id not in ALLOWED_INSTRUMENTS or bar != "5m":
             raise OkxClientError("模型训练只允许 BTC-USDT 的 5m 公共 K 线")
-        if not 300 <= limit <= 5_000:
-            raise OkxClientError("模型训练 K 线数量必须在 300–5000 之间")
+        if not 300 <= limit <= 20_000:
+            raise OkxClientError("模型训练 K 线数量必须在 300–20000 之间")
 
         rows_by_timestamp: dict[int, list[Any]] = {}
         after: str | None = None
         while len(rows_by_timestamp) < limit:
-            page_size = min(300, limit - len(rows_by_timestamp))
+            page_size = min(100, limit - len(rows_by_timestamp))
             params = {"instId": inst_id, "bar": bar, "limit": str(page_size)}
             if after:
                 params["after"] = after
@@ -297,6 +306,8 @@ class OkxClient:
             after = next_after
             if len(page) < page_size:
                 break
+            if len(rows_by_timestamp) < limit and self._history_page_delay_seconds:
+                await asyncio.sleep(self._history_page_delay_seconds)
 
         return [rows_by_timestamp[key] for key in sorted(rows_by_timestamp)][-limit:]
 

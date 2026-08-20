@@ -14,7 +14,11 @@ from okx_demo_lab.okx_client import (
     DispatchBlockedError,
     OkxClientError,
 )
-from okx_demo_lab.service import TradingService, _account_fingerprint
+from okx_demo_lab.service import (
+    CommitBlockedBeforeDispatch,
+    TradingService,
+    _account_fingerprint,
+)
 from okx_demo_lab.state import SafetyController, SafetyError
 
 
@@ -256,6 +260,34 @@ class ManualReviewClient(FakeOkxClient):
         ]
 
 
+class FilledIocOrderClient(FakeOkxClient):
+    async def get_order(
+        self,
+        _: str,
+        cl_ord_id: str,
+        *,
+        expected_credential_fingerprint: str | None = None,
+    ) -> list[dict]:
+        self._check_identity(expected_credential_fingerprint)
+        return [
+            {
+                "instId": "BTC-USDT",
+                "clOrdId": cl_ord_id,
+                "ordId": "42",
+                "tag": "tideguarddemo",
+                "side": "buy",
+                "ordType": "ioc",
+                "sz": "0.00020",
+                "accFillSz": "0.00015",
+                "avgPx": "64001.2",
+                "fee": "-0.00000015",
+                "feeCcy": "BTC",
+                "state": "canceled",
+                "uTime": "1787184000000",
+            }
+        ]
+
+
 class DispatchGateClient(FakeOkxClient):
     def __init__(self) -> None:
         super().__init__()
@@ -379,6 +411,145 @@ async def test_concurrent_commits_dispatch_only_once(tmp_path, monkeypatch) -> N
         replay = await service.commit(preview["intentId"], preview["digest"], "b" * 16)
     assert accepted["status"] == "accepted"
     assert replay["replayed"] is True
+
+
+@pytest.mark.asyncio
+async def test_supervised_arm_and_terminal_ioc_inspection(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("okx_demo_lab.service.credentials_configured", lambda: True)
+    store = AuditStore(tmp_path / "state.sqlite3")
+    safety = SafetyController(store)
+    client = FilledIocOrderClient()
+    service = TradingService(client, store, safety)  # type: ignore[arg-type]
+
+    state = await service.arm_supervised(
+        "sup_" + "1" * 28,
+        (CREDENTIAL_A, ACCOUNT_A),
+        purpose="entry",
+    )
+    assert state["mode"] == "armed"
+    assert state["armedRemainingSeconds"] <= 90
+    assert client.caa_calls == [20]
+
+    with pytest.raises(SafetyError, match="不能创建浏览器"):
+        await service.preview(
+            OrderDraft(
+                instId="BTC-USDT",
+                side="buy",
+                ordType="ioc",
+                price="64000.0",
+                size="0.00020",
+            )
+        )
+
+    preview = await service.preview(
+        OrderDraft(
+            instId="BTC-USDT",
+            side="buy",
+            ordType="ioc",
+            price="64000.0",
+            size="0.00020",
+        ),
+        supervisor_decision_id="sup_" + "1" * 28,
+        supervisor_purpose="entry",
+    )
+    result = await service.commit(
+        preview["intentId"], preview["digest"], "supervisor-ioc-1"
+    )
+    assert result["status"] == "accepted"
+
+    order = await service.inspect_intent_order(
+        preview["intentId"], (CREDENTIAL_A, ACCOUNT_A)
+    )
+    assert order["state"] == "canceled"
+    assert order["filledSize"] == "0.00015"
+    assert order["averagePrice"] == "64001.2"
+    assert order["feeCurrency"] == "BTC"
+    assert store.get_intent(preview["intentId"])["status"] == "terminal_verified"
+
+
+@pytest.mark.asyncio
+async def test_supervisor_arm_cannot_submit_a_prior_manual_preview(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("okx_demo_lab.service.credentials_configured", lambda: True)
+    store = AuditStore(tmp_path / "state.sqlite3")
+    safety = SafetyController(store)
+    client = FakeOkxClient()
+    service = TradingService(client, store, safety)  # type: ignore[arg-type]
+    safety.arm("DEMO", CREDENTIAL_A, ACCOUNT_A)
+    service._record_deadman_success()
+    preview = await service.preview(
+        OrderDraft(
+            instId="BTC-USDT",
+            side="buy",
+            ordType="ioc",
+            price="64000.0",
+            size="0.00020",
+        )
+    )
+    await service.disarm("test-switch")
+    await service.arm_supervised(
+        "sup_" + "7" * 28,
+        (CREDENTIAL_A, ACCOUNT_A),
+        purpose="entry",
+    )
+
+    with pytest.raises(ValueError, match="不能提交人工"):
+        await service.commit(
+            preview["intentId"], preview["digest"], "manual-preview-block"
+        )
+    assert client.place_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_additional_model_gate_blocks_before_order_http(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("okx_demo_lab.service.credentials_configured", lambda: True)
+    store = AuditStore(tmp_path / "state.sqlite3")
+    safety = SafetyController(store)
+    safety.arm("DEMO", CREDENTIAL_A, ACCOUNT_A)
+    client = FakeOkxClient()
+    service = TradingService(client, store, safety)  # type: ignore[arg-type]
+    service._record_deadman_success()
+    preview = await service.preview(
+        OrderDraft(
+            instId="BTC-USDT",
+            side="buy",
+            ordType="ioc",
+            price="64000.0",
+            size="0.00020",
+        )
+    )
+
+    def reject_model_dispatch() -> None:
+        raise RuntimeError("model generation changed")
+
+    with pytest.raises(CommitBlockedBeforeDispatch, match="发送前"):
+        await service.commit(
+            preview["intentId"],
+            preview["digest"],
+            "model-gate-blocked",
+            additional_dispatch_guard=reject_model_dispatch,
+        )
+
+    assert client.place_calls == 0
+    assert store.get_intent(preview["intentId"])["status"] == "blocked_before_dispatch"
+
+
+@pytest.mark.asyncio
+async def test_supervised_arm_rejects_bound_account_change(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("okx_demo_lab.service.credentials_configured", lambda: True)
+    store = AuditStore(tmp_path / "state.sqlite3")
+    safety = SafetyController(store)
+    service = TradingService(FakeOkxClient(), store, safety)  # type: ignore[arg-type]
+
+    with pytest.raises(CredentialIdentityError, match="绑定不一致"):
+        await service.arm_supervised(
+            "sup_" + "2" * 28,
+            (CREDENTIAL_A, ACCOUNT_B),
+            purpose="entry",
+        )
+
+    assert store.get_flag("kill_active") == "true"
 
 
 @pytest.mark.asyncio

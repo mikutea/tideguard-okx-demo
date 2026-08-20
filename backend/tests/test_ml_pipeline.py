@@ -37,6 +37,8 @@ from okx_demo_lab.ml.strategy import (
     feature_schema_hash,
 )
 from okx_demo_lab.ml.walk_forward import (
+    LEGACY_LONG_ONLY_EVALUATION_MODE,
+    LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION,
     LEGACY_VALIDATION_SCHEMA_VERSION,
     Observation,
     TrainingConfig,
@@ -250,6 +252,13 @@ def test_legacy_validation_remains_readable_but_cannot_be_promoted():
 
     assert legacy_report.to_dict() == legacy_payload
     assert "unsupported_evaluation_semantics" in PromotionPolicy().failures(legacy_report)
+
+    v2_payload = report.to_dict()
+    v2_payload["schema_version"] = LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION
+    v2_payload["evaluation_mode"] = LEGACY_LONG_ONLY_EVALUATION_MODE
+    v2_report = ValidationReport.from_dict(v2_payload)
+    assert v2_report.to_dict() == v2_payload
+    assert "unsupported_evaluation_semantics" in PromotionPolicy().failures(v2_report)
 
 
 def test_frozen_bundle_is_canonical_strict_and_tamper_evident():

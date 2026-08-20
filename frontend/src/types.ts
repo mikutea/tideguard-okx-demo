@@ -116,7 +116,7 @@ export interface PreviewResult {
   order: {
     instId: string;
     side: "buy" | "sell";
-    ordType: "limit" | "post_only";
+    ordType: "limit" | "post_only" | "ioc";
     price: string;
     size: string;
   };
@@ -206,5 +206,145 @@ export interface MLStatus {
     mode: string;
     directOkxDemoExecution: boolean;
     pinnedReferenceVersion: string;
+  };
+  longRun: LongRunStatus;
+}
+
+export interface LongRunPosition {
+  positionId: string;
+  modelId: string;
+  championGeneration: number;
+  status: "entry_submitted" | "entry_unfilled" | "long" | "exit_submitted" | "closed" | "closed_dust" | "manual_review";
+  requestedSize: string;
+  filledSize: string;
+  remainingSize: string;
+  entryAvgPrice: string | null;
+  entryCandleAt: string;
+  exitDueAt: string;
+  hardExitAt: string;
+  stopPrice: string | null;
+  takeProfitPrice: string | null;
+  exitAttempts: number;
+  realizedReturn: number | null;
+  failureReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+}
+
+export interface SupervisorModelReview {
+  modelId: string;
+  artifactSha256: string;
+  state: MLModelSummary["state"];
+  trainer: string;
+  createdAt: string;
+  trainedThrough: string;
+  deterministicFailures: string[];
+  shadowFailures: string[];
+  comparisonFailures: string[];
+  metrics: null | {
+    aggregateAccuracy: number;
+    evaluationMode: string;
+    folds: number;
+    maxDrawdown: number;
+    netReturn: number;
+    oosRows: number;
+    reportSha256: string;
+    roundTripCostBps: number;
+    trades: number;
+    worstFoldNetReturn: number;
+  };
+  shadow: {
+    settledSignals: number;
+    settledBuys: number;
+    netReturn: number;
+    maxDrawdown: number;
+    durationDays: number;
+    firstSignalAt: string | null;
+    lastSettledAt: string | null;
+  };
+}
+
+export interface LongRunStatus {
+  schemaVersion: string;
+  state: {
+    desiredMode: "disabled" | "shadow" | "demo";
+    runtimeStatus: "disabled" | "shadow" | "waiting_supervisor" | "waiting_champion" | "running" | "exit_only" | "suspended" | "manual_review";
+    identityBound: boolean;
+    suspendedReason: string | null;
+    stateVersion: number;
+    enabledAt: string | null;
+    updatedAt: string;
+  };
+  activePosition: LongRunPosition | null;
+  latestTraining: null | {
+    runId: string;
+    startedAt: string;
+    completedAt: string | null;
+    status: "running" | "completed" | "failed";
+    modelId: string | null;
+    errorType: string | null;
+    result: Record<string, unknown> | null;
+  };
+  recentDecisions: Array<{
+    decisionId: string;
+    kind: "promote" | "lease" | "reject" | "rollback" | "suspend";
+    modelId: string | null;
+    generation: number;
+    issuedAt: string;
+    expiresAt: string;
+    appliedAt: string | null;
+  }>;
+  recentPositions: LongRunPosition[];
+  demoPerformance: {
+    closedPositions: number;
+    netReturn: number;
+    maxDrawdown: number;
+    lastClosedAt: string | null;
+  };
+  policy: {
+    policySha256: string;
+    fixed_notional_usdt: string;
+    max_daily_entries: number;
+    hold_bars: number;
+    max_holding_bars: number;
+    stop_loss_fraction: string;
+    take_profit_fraction: string;
+    ioc_slippage_fraction: string;
+    round_trip_cost_bps: string;
+    max_exit_attempts: number;
+    train_interval_hours: number;
+    training_retry_hours: number;
+    supervisor_lease_hours: number;
+    shadow_min_settled: number;
+    shadow_min_days: number;
+    max_demo_drawdown: string;
+    min_challenger_oos_improvement: string;
+    max_challenger_drawdown_regression: string;
+  };
+  champion: MLStatus["champion"];
+  activeSupervisorLease: null | {
+    decisionId: string;
+    modelId: string;
+    generation: number;
+    issuedAt: string;
+    expiresAt: string;
+    evidenceSha256: string;
+    appliedAt: string;
+  };
+  review: {
+    schemaVersion: string;
+    evidenceSha256: string;
+    generatedAt: string;
+    auditChainValid: boolean;
+    championSupervisorApproved: boolean;
+    demoPerformance: LongRunStatus["demoPerformance"];
+    generation: number;
+    models: SupervisorModelReview[];
+  };
+  lastError: null | {
+    at: string;
+    errorType: string;
+    failClosed: boolean;
   };
 }

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from inspect import signature
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -61,6 +61,16 @@ class DesktopContractTests(unittest.TestCase):
             second.close()
             first.close()
 
+    @unittest.skipUnless(os.name == "nt", "Windows named event")
+    def test_backend_stop_signal_round_trip(self) -> None:
+        signal = desktop.BackendStopSignal()
+        try:
+            signal.create()
+            self.assertTrue(desktop.BackendStopSignal.signal())
+            self.assertTrue(signal.wait(100))
+        finally:
+            signal.close()
+
     def test_frontend_bundle_requires_index(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.object(desktop, "_resource_root", return_value=Path(temp_dir)):
@@ -92,6 +102,63 @@ class DesktopContractTests(unittest.TestCase):
             self.assertEqual(desktop.run(["--self-test"]), 0)
         configure_logging.assert_not_called()
         self_test.assert_called_once_with()
+
+    def test_daemon_mode_never_opens_a_webview(self) -> None:
+        logger = Mock()
+        with (
+            patch.object(desktop, "_configure_logging", return_value=(logger, Path("log"))),
+            patch.object(desktop, "_run_daemon", return_value=0) as daemon,
+            patch.dict(sys.modules, {"webview": Mock()}),
+        ):
+            self.assertEqual(desktop.run(["--daemon"]), 0)
+        daemon.assert_called_once_with(logger)
+
+    def test_stop_daemon_is_idempotent_when_backend_is_absent(self) -> None:
+        logger = Mock()
+        with (
+            patch.object(desktop, "_configure_logging", return_value=(logger, Path("log"))),
+            patch.object(desktop.BackendStopSignal, "signal", return_value=False),
+            patch.object(desktop, "_probe_backend", return_value=False),
+        ):
+            self.assertEqual(desktop.run(["--stop-daemon"]), 0)
+
+    def test_stop_daemon_waits_until_health_endpoint_disappears(self) -> None:
+        with (
+            patch.object(desktop.BackendStopSignal, "signal", return_value=True),
+            patch.object(desktop, "_probe_backend", side_effect=[True, True, False]),
+            patch.object(desktop.time, "sleep") as sleep,
+        ):
+            self.assertTrue(desktop._stop_daemon_and_wait(timeout=1.0))
+        self.assertGreaterEqual(sleep.call_count, 1)
+
+    def test_backend_probe_requires_exact_tideguard_identity(self) -> None:
+        class Response:
+            status = 200
+
+            def __init__(self, payload: bytes):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def read(self):
+                return self.payload
+
+        opener = Mock()
+        opener.open.return_value = Response(
+            b'{"status":"ok","app":"Tideguard","environment":"demo","version":"0.3.0"}'
+        )
+        with patch.object(desktop.urllib.request, "build_opener", return_value=opener):
+            self.assertTrue(desktop._probe_backend())
+
+        opener.open.return_value = Response(
+            b'{"status":"ok","app":"other","environment":"demo","version":"0.3.0"}'
+        )
+        with patch.object(desktop.urllib.request, "build_opener", return_value=opener):
+            self.assertFalse(desktop._probe_backend())
 
 
 if __name__ == "__main__":

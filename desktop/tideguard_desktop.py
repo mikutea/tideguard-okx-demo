@@ -18,13 +18,18 @@ from typing import Any
 
 
 APP_NAME = "Tideguard"
-APP_MUTEX = r"Local\Tideguard.Desktop.2d2663b4-03de-4f3d-bc77-12556deba51f"
+UI_MUTEX = r"Local\Tideguard.Desktop.2d2663b4-03de-4f3d-bc77-12556deba51f"
+APP_MUTEX = UI_MUTEX
+BACKEND_MUTEX = r"Local\Tideguard.Backend.2d2663b4-03de-4f3d-bc77-12556deba51f"
 CREDENTIALS_MUTEX = r"Local\Tideguard.Credentials.2d2663b4-03de-4f3d-bc77-12556deba51f"
+BACKEND_STOP_EVENT = r"Local\Tideguard.BackendStop.2d2663b4-03de-4f3d-bc77-12556deba51f"
 ERROR_ALREADY_EXISTS = 183
+WAIT_OBJECT_0 = 0
 STARTUP_TIMEOUT_SECONDS = 20.0
 LOCAL_PORT = 8791
 WINDOW_SIZE = (1440, 900)
 WINDOW_MIN_SIZE = (1080, 680)
+BACKEND_URL = f"http://127.0.0.1:{LOCAL_PORT}"
 
 
 class DesktopStartupError(RuntimeError):
@@ -114,6 +119,72 @@ class SingleInstance:
         self.close()
 
 
+class BackendStopSignal:
+    """A per-user named event used only to stop the background daemon."""
+
+    EVENT_MODIFY_STATE = 0x0002
+    SYNCHRONIZE = 0x00100000
+
+    def __init__(self) -> None:
+        self._handle: int | None = None
+        self._kernel32: Any | None = None
+
+    def create(self) -> None:
+        if os.name != "nt":  # pragma: no cover
+            return
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateEventW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_bool,
+            ctypes.c_bool,
+            ctypes.c_wchar_p,
+        ]
+        kernel32.CreateEventW.restype = ctypes.c_void_p
+        kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        kernel32.WaitForSingleObject.restype = ctypes.c_uint
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.CreateEventW(None, True, False, BACKEND_STOP_EVENT)
+        if not handle:
+            raise DesktopStartupError("无法创建后台停止事件")
+        self._kernel32 = kernel32
+        self._handle = int(handle)
+
+    def wait(self, timeout_ms: int) -> bool:
+        if self._handle is None or self._kernel32 is None:
+            time.sleep(max(0, timeout_ms) / 1_000)
+            return False
+        return (
+            self._kernel32.WaitForSingleObject(
+                ctypes.c_void_p(self._handle), max(0, int(timeout_ms))
+            )
+            == WAIT_OBJECT_0
+        )
+
+    @classmethod
+    def signal(cls) -> bool:
+        if os.name != "nt":  # pragma: no cover
+            return False
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenEventW.argtypes = [ctypes.c_uint, ctypes.c_bool, ctypes.c_wchar_p]
+        kernel32.OpenEventW.restype = ctypes.c_void_p
+        kernel32.SetEvent.argtypes = [ctypes.c_void_p]
+        kernel32.SetEvent.restype = ctypes.c_bool
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.OpenEventW(cls.EVENT_MODIFY_STATE, False, BACKEND_STOP_EVENT)
+        if not handle:
+            return False
+        try:
+            return bool(kernel32.SetEvent(handle))
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def close(self) -> None:
+        if self._handle is not None and self._kernel32 is not None:
+            self._kernel32.CloseHandle(ctypes.c_void_p(self._handle))
+        self._handle = None
+        self._kernel32 = None
+
+
 def _resource_root() -> Path:
     if getattr(sys, "frozen", False):
         bundle_root = getattr(sys, "_MEIPASS", None)
@@ -168,6 +239,24 @@ def _configure_application(frontend_dist: Path, port: int) -> Any:
     return app_module.app
 
 
+def _probe_backend(url: str = BACKEND_URL, *, timeout: float = 0.75) -> bool:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"{url}/healthz", timeout=timeout) as response:
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("status") == "ok"
+        and payload.get("app") == APP_NAME
+        and payload.get("environment") == "demo"
+        and payload.get("version") == "0.3.0"
+    )
+
+
 class LocalServer:
     def __init__(self, app: Any, sock: socket.socket, port: int) -> None:
         import uvicorn
@@ -205,19 +294,13 @@ class LocalServer:
     def start(self) -> None:
         self.thread.start()
         deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         while time.monotonic() < deadline:
             if self.failure_type or (not self.thread.is_alive() and not self.server.started):
                 raise DesktopStartupError(
                     f"本地服务启动失败（{self.failure_type or 'ServerStopped'}）"
                 )
-            if self.server.started:
-                try:
-                    with opener.open(f"{self.url}/healthz", timeout=0.5) as response:
-                        if response.status == 200:
-                            return
-                except OSError:
-                    pass
+            if self.server.started and _probe_backend(self.url, timeout=0.5):
+                return
             time.sleep(0.05)
         raise DesktopStartupError("本地服务启动超时")
 
@@ -429,6 +512,80 @@ def _run_credentials_window() -> int:
     return 0
 
 
+def _start_owned_backend() -> tuple[SingleInstance, LocalServer]:
+    backend_instance = SingleInstance(BACKEND_MUTEX)
+    reserved_socket: socket.socket | None = None
+    try:
+        backend_instance.acquire()
+        reserved_socket, port = _reserve_loopback_socket()
+        app = _configure_application(_frontend_dist(), port)
+        server = LocalServer(app, reserved_socket, port)
+        server.start()
+        reserved_socket = None
+        return backend_instance, server
+    except BaseException:
+        if reserved_socket is not None:
+            reserved_socket.close()
+        backend_instance.close()
+        raise
+
+
+def _connect_or_start_backend() -> tuple[str, SingleInstance | None, LocalServer | None]:
+    if _probe_backend():
+        return BACKEND_URL, None, None
+    try:
+        backend_instance, server = _start_owned_backend()
+        return server.url, backend_instance, server
+    except AlreadyRunningError:
+        deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if _probe_backend():
+                return BACKEND_URL, None, None
+            time.sleep(0.05)
+        raise DesktopStartupError("后台服务持有互斥锁，但未通过本机身份检查")
+
+
+def _run_daemon(logger: logging.Logger) -> int:
+    backend_instance: SingleInstance | None = None
+    server: LocalServer | None = None
+    stop_signal = BackendStopSignal()
+    try:
+        backend_instance, server = _start_owned_backend()
+        stop_signal.create()
+        logger.info("Background daemon started on loopback port %d", server.port)
+        while server.thread.is_alive() and not server.failure_type:
+            if stop_signal.wait(1_000):
+                logger.info("Background daemon received a local stop signal")
+                break
+        if server.failure_type:
+            raise DesktopStartupError(
+                f"后台服务异常终止（{server.failure_type}）"
+            )
+        return 0
+    except AlreadyRunningError:
+        if _probe_backend():
+            return 0
+        raise DesktopStartupError("后台互斥锁已占用，但本机服务身份校验失败")
+    finally:
+        if server is not None:
+            server.stop()
+        stop_signal.close()
+        if backend_instance is not None:
+            backend_instance.close()
+
+
+def _stop_daemon_and_wait(timeout: float = 90.0) -> bool:
+    signaled = BackendStopSignal.signal()
+    if not signaled and not _probe_backend():
+        return True
+    deadline = time.monotonic() + max(0.1, timeout)
+    while time.monotonic() < deadline:
+        if not _probe_backend():
+            return True
+        time.sleep(0.1)
+    return not _probe_backend()
+
+
 def run(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv == ["--self-test"]:
@@ -444,10 +601,19 @@ def run(argv: list[str] | None = None) -> int:
             self_test_instance.close()
 
     logger, log_path = _configure_logging()
+    if argv == ["--stop-daemon"]:
+        return 0 if _stop_daemon_and_wait() else 1
     credential_mode = argv == ["--credentials"]
-    instance = SingleInstance(CREDENTIALS_MUTEX if credential_mode else APP_MUTEX)
+    daemon_mode = argv == ["--daemon"]
+    if daemon_mode:
+        try:
+            return _run_daemon(logger)
+        except BaseException as exc:
+            logger.error("Background daemon failed: %s", type(exc).__name__)
+            return 1
+    instance = SingleInstance(CREDENTIALS_MUTEX if credential_mode else UI_MUTEX)
+    backend_instance: SingleInstance | None = None
     local_server: LocalServer | None = None
-    reserved_socket: socket.socket | None = None
     try:
         instance.acquire()
         if credential_mode:
@@ -455,19 +621,17 @@ def run(argv: list[str] | None = None) -> int:
         if argv:
             raise DesktopStartupError("不支持的启动参数")
 
-        dist = _frontend_dist()
-        reserved_socket, port = _reserve_loopback_socket()
-        app = _configure_application(dist, port)
-        local_server = LocalServer(app, reserved_socket, port)
-        local_server.start()
-        reserved_socket = None
-        logger.info("Desktop host started on loopback port %d", port)
+        local_url, backend_instance, local_server = _connect_or_start_backend()
+        if local_server is None:
+            logger.info("Desktop connected to existing background daemon")
+        else:
+            logger.info("Desktop host started on loopback port %d", local_server.port)
 
         import webview
 
         webview.create_window(
             APP_NAME,
-            local_server.url,
+            local_url,
             width=WINDOW_SIZE[0],
             height=WINDOW_SIZE[1],
             min_size=WINDOW_MIN_SIZE,
@@ -490,8 +654,8 @@ def run(argv: list[str] | None = None) -> int:
     finally:
         if local_server is not None:
             local_server.stop()
-        elif reserved_socket is not None:
-            reserved_socket.close()
+        if backend_instance is not None:
+            backend_instance.close()
         instance.close()
 
 
