@@ -1,4 +1,42 @@
-# Tideguard v0.3 验证记录
+# 墨衡 MOHENG v0.4 验证记录
+
+验证日期：2026-08-21。v0.4 将公共品牌、全历史研究仓库、v4 rolling walk-forward、Codex 监督门、Demo/Live 环境隔离和 Windows 发行链放在同一次可复核验收中。收益指标只用于拒绝或晋级模型，不构成收益保证。
+
+## 离线与界面验收
+
+- `scripts/check.ps1`：后端 `163 passed`；桌面宿主 `16 passed`；Windows 发行契约 `6 passed`；前端环境/高风险交互契约 `13 passed`；TypeScript 和 Vite 生产构建通过。
+- 历史终点、内部 gap 恢复、快照失效、Supervisor/lease/执行门的独立定向复核为 `103 passed`，未发现剩余 P0/P1/P2。
+- 墨衡运行中心、数据、训练、模型、执行、审计设置六条主路径均完成桌面与 `375px` 移动验收；无页面级横向溢出，移动主交互最小高度 44px，浏览器控制台为 0 error。
+- Demo/Live 环境未知、子请求失败、切换中、重启待生效均失败关闭；Live 使用永久朱砂风险语义、服务器倒计时、四项确认和逐字短语。Live 自动量化仍硬禁用，只开放 60 秒、10 USDT、1 挂单的独立人工授权。
+
+## 真实 OKX 公共历史与首轮 v4 训练
+
+- 公共 `BTC-USDT / SPOT / 5m` 仓库完成两阶段历史终点确认；最终 `905,294` 根，UTC `2018-01-11 11:10` 至 `2026-08-20 20:15`，缺口 `0`、未解决冲突 `0`。
+- 内容快照：`dset_08123b986d947c9af478b8f5`；SHA-256 `08123b986d947c9af478b8f5b135d8e92b271315cca295d74fafeff7113c1319`。
+- 第一次空页只产生 `HistoryOriginUnconfirmed`，没有快照或训练；至少 60 秒后用不同游标和 `limit=100` 再次为空，才完成仓库。公共请求不携带 Demo 私有头。
+- 三组候选均绑定代码提交 `34b9537f783f6f3c1ed558bfb853bc38f14686df`、同一快照、同一 30 折 rolling 协议和 `777,600` 个 OOS 行。
+
+| 模型 | OOS 交易 | 扣成本净结果 | 最大回撤 | 最弱折 | 结论 |
+|---|---:|---:|---:|---:|---|
+| `mdl_36e55422de66abefab9eb9e8` | 3,799 | -99.9939% | 99.9939% | -63.6672% | 拒绝 |
+| `mdl_9c4c032e678be0c526ed9688` | 2,042 | -99.5359% | 99.5359% | -47.3966% | 拒绝 |
+| `mdl_e4932366ff58f73142cb6985` | 1,299 | -95.6532% | 95.6532% | -35.2676% | 拒绝 |
+
+三者虽有约 75% 的 aggregate accuracy，但全部失败于净结果、最弱时间折和回撤硬门，已由 Codex Supervisor 逐个落盘为 `rejected`。最终 `champion=null`、长期 master disabled、无模型持仓、无订单。
+
+## 真实 Demo 只读连接
+
+- 本机凭证仍只在 Windows Credential Manager；项目、SQLite、日志、安装包均不含原始 Key/Secret/Passphrase。
+- 真实 Demo 只读连接结果：public=true、privateReachable=true、policyValid=true、environment=demo；审计链有效，safety=observe。
+- 本轮没有 arm、preview、commit、下单、撤单或切换 Live；Live 只通过 mock/故障注入和契约测试验证，不能把它表述为真实资金交易验证。
+
+## Windows v0.4 发行与安装
+
+最终重建、冻结联网、manifest、升级安装与已安装连接验证完成后，在此追加精确产物大小和 SHA-256。当前 `release/` 中早于最终源码的 v0.4 文件不得发布。
+
+---
+
+# Tideguard v0.3 历史验证记录
 
 > 历史归档：以下是 v0.3 当时实际完成的验证，不是墨衡 v0.4 发布证明。v0.4 的最终测试、安装升级和历史训练结果将在本轮验收后另行追加，旧结论不得外推到 Live 路径。
 
