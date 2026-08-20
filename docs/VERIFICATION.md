@@ -30,7 +30,7 @@
 | `mdl_3cb7e5eec38ac1b26ace5c1d` | 1 | 0.2456% | 交易数不足、净结果低于 0.5% |
 | `mdl_2807267583cdf50654b3f3a8` | 0 | 0.0000% | 交易数不足、净结果低于 0.5% |
 
-三者因此都保持 `validated`，没有 champion、没有 execution lease、没有交易。约 88% 的 long/flat 准确率主要来自 HOLD，未被当作收益证据。
+三者先进入 `validated` 以保留报告，随后本轮 Codex Supervisor 使用每次状态更新后的新 evidence hash，逐个写入 `reject` 决策；最终三者均为 `rejected`。没有 champion、没有 execution lease、没有交易。约 88% 的 long/flat 准确率主要来自 HOLD，未被当作收益证据。
 
 ## 浏览器验收
 
@@ -59,7 +59,7 @@
 - 已安装 daemon 进程参数为 `Tideguard.exe --daemon`，`/healthz` 返回 `Tideguard / demo / 0.3.0`。
 - 当前运行状态：`desiredMode=disabled`、`credentialConfigured=false`、`safety=observe`、`killActive=false`、`auditChainValid=true`。
 
-本机 Codex 已创建每 6 小时一次的 `Tideguard Codex Supervisor` 周期任务。它只运行脱敏 supervisor CLI；不得访问凭证、私有 API、订单、风控代码或用户 master。
+本机 Codex 已创建每 6 小时一次的 `Tideguard Codex Supervisor` 周期任务。它只运行脱敏 supervisor CLI；不得访问凭证、私有 API、订单、风控代码或用户 master。本轮已用实际失败候选验证 `review → reject → 重新 review` 的证据更新链，最终 evidence 为 `554292ffd75a8d796e16fdcd7389e923b04bf65198550b4ff04f55c2030f5afb`。
 
 ## 尚未验证或有意未开放
 
