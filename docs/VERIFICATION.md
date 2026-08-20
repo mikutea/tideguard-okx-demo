@@ -45,19 +45,20 @@
 
 ## Windows 发行与安装
 
-发行文件：
+GitHub `v0.3.0` 公开 Release 文件（远端标签构建的最终值）：
 
 | 文件 | 大小 | SHA-256 |
 |---|---:|---|
-| `Tideguard-Setup-0.3.0.exe` | 21,635,767 | `6eeb721282719cc40f335e4dcd07f9f377f09ba88145cc0630ea97f742abc1ea` |
-| `Tideguard-0.3.0-windows-x64.zip` | 23,064,832 | `a9f56ee5e9377b75f52c35ee6097389e30cd7b818a9a5502ce9ad8ffab440bfa` |
-| `Tideguard-0.3.0-manifest.json` | 42,938 | `eda59c6a8e28a94c8f6014dc9d80f9c994b83228f946d952b4a66c9b6ae442b6` |
+| `Tideguard-Setup-0.3.0.exe` | 21,625,478 | `7f8caaf6b5c31ac7ddf4d0270249cb018c37b940ae9bc8338c78eca22b035c20` |
+| `Tideguard-0.3.0-windows-x64.zip` | 23,062,970 | `413e27c721743d0aa8ce8a6d53f69755962abede8465cf323ce7d072e9668edb` |
+| `Tideguard-0.3.0-manifest.json` | 43,671 | `862905c78816cc1f460c7f5abf5efafd5d975bf9665587a3b952053f6c2cf2e3` |
 
-- ZIP 解包后 228/228 个文件的大小与 SHA-256 均匹配 manifest；`credentialsBundled=false`。
-- 安装目录 `%LOCALAPPDATA%\Programs\Tideguard` 的 228/228 个发行文件再次逐项匹配 manifest。
+- 从公开 Release 重新下载 ZIP、manifest 与 SHA256SUMS 后，232/232 个文件的大小和 SHA-256 均匹配，且 `credentialsBundled=false`。
+- 本机在推送标签前独立构建并安装的同源产物包含 228 个发行文件；安装目录 `%LOCALAPPDATA%\Programs\Tideguard` 的 228/228 个文件逐项匹配其本机构建 manifest。两次构建都来自同一代码提交，公开分发以 Release 的 SHA256SUMS 为准。
 - 安装器注册版本 0.3.0，创建主界面、凭证管理、停止后台三个开始菜单入口，以及当前用户登录自启动 daemon。
 - 已安装 daemon 进程参数为 `Tideguard.exe --daemon`，`/healthz` 返回 `Tideguard / demo / 0.3.0`。
 - 当前运行状态：`desiredMode=disabled`、`credentialConfigured=false`、`safety=observe`、`killActive=false`、`auditChainValid=true`。
+- GitHub `main` 两次 Windows Offline checks 均成功；`v0.3.0` 的 Windows release `build` 与 `publish` job 均成功，Release 为非草稿、非预发布。
 
 本机 Codex 已创建每 6 小时一次的 `Tideguard Codex Supervisor` 周期任务。它只运行脱敏 supervisor CLI；不得访问凭证、私有 API、订单、风控代码或用户 master。本轮已用实际失败候选验证 `review → reject → 重新 review` 的证据更新链，最终 evidence 为 `554292ffd75a8d796e16fdcd7389e923b04bf65198550b4ff04f55c2030f5afb`。
 
