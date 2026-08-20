@@ -90,6 +90,7 @@ class ReleaseContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("Assert-SafeFrontendBuildEnvironment", build_script)
+        self.assertIn("must never make release tests or PyInstaller import a stale", build_script)
         self.assertIn('Get-ChildItem Env:', build_script)
         self.assertIn('Invoke-Native "corepack" "pnpm" "test"', build_script)
         self.assertIn("WebView2BootstrapperPath", build_script)

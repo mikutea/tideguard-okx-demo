@@ -246,8 +246,11 @@ if ($LASTEXITCODE -ne 0) { throw "Unable to inspect the source Git worktree" }
 if (-not $SkipDependencyInstall) {
     Invoke-Native $PythonExe "-m" "pip" "install" "--require-hashes" "-r" $BuildToolsLock
     Invoke-Native $PythonExe "-m" "pip" "install" "--require-hashes" "--no-build-isolation" "-r" $RequirementsLock
-    Invoke-Native $PythonExe "-m" "pip" "install" "--no-deps" "--no-build-isolation" $BackendDir
 }
+# The local package must always be refreshed.  Skipping third-party dependency
+# installation must never make release tests or PyInstaller import a stale
+# editable build from an earlier source tree.
+Invoke-Native $PythonExe "-m" "pip" "install" "--no-deps" "--no-build-isolation" $BackendDir
 
 Assert-SafeFrontendBuildEnvironment
 Assert-NoHardcodedSourceSecrets
