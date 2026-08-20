@@ -4,7 +4,8 @@ export interface SystemStatus {
   app: string;
   version: string;
   environment: string;
-  demoHeader: string;
+  environmentProfile?: EnvironmentStatus;
+  demoHeader: string | null;
   baseUrl: string;
   bind: string;
   credentialConfigured: boolean;
@@ -129,6 +130,114 @@ export interface PreviewResult {
   };
 }
 
+export type EnvironmentMode = "demo" | "live" | "unknown";
+export type EnvironmentTarget = Exclude<EnvironmentMode, "unknown">;
+
+export interface EnvironmentStatus {
+  activeEnvironment: EnvironmentTarget;
+  activeDisplayName: string;
+  configuredEnvironment: EnvironmentTarget;
+  restartRequired: boolean;
+  transitionPending?: boolean;
+  transitionTarget?: EnvironmentTarget | null;
+  selectorValid: boolean;
+  selectorError: string | null;
+  switchId: string | null;
+  updatedAt: string | null;
+  operatingMode: "observe" | "runtime" | "transition_locked";
+  credentialConfigured?: boolean;
+  credentialService?: string;
+  orderTag?: string;
+  simulatedTradingHeader?: boolean;
+  liveManualTradingAvailable?: boolean;
+  liveAutomationAvailable?: boolean;
+  independentLiveAuthorizationRequired?: boolean;
+}
+
+export interface EnvironmentPreflightCheck {
+  key: string;
+  label?: string;
+  passed: boolean;
+  detail?: string | null;
+}
+
+export interface EnvironmentPreflight {
+  source: EnvironmentTarget;
+  target: EnvironmentTarget;
+  allowed: boolean;
+  checks: EnvironmentPreflightCheck[];
+  preflightSha256: string;
+  binding?: {
+    currentCredentialFingerprint: string | null;
+    currentAccountFingerprint: string | null;
+    targetCredentialFingerprint: string | null;
+    targetAccountFingerprint: string | null;
+  };
+}
+
+export interface EnvironmentChallenge {
+  nonce: string;
+  source: EnvironmentTarget;
+  target: EnvironmentTarget;
+  confirmationPhrase: string;
+  issuedAt: string;
+  readyAt: string;
+  expiresAt: string;
+  requiredAcknowledgements: Array<keyof EnvironmentAcknowledgements>;
+  preflight: EnvironmentPreflight;
+}
+
+export interface EnvironmentAcknowledgements {
+  automationStopped: boolean;
+  noOutstandingState: boolean;
+  restartRequired: boolean;
+  liveFundsAtRisk: boolean;
+}
+
+export interface EnvironmentSwitchResult extends EnvironmentStatus {
+  source: EnvironmentTarget;
+  target: EnvironmentTarget;
+  killActive: boolean;
+  targetKillActive: boolean;
+}
+
+export interface FoldMetric {
+  fold: number;
+  startAt: string | null;
+  endAt: string | null;
+  netReturn: number | null;
+  maxDrawdown: number | null;
+  trades: number | null;
+  status: "pass" | "fail" | "unknown";
+}
+
+export interface ResearchStatus {
+  dataset?: {
+    source: string;
+    instrument: string;
+    bar: string;
+    confirmedRows: number;
+    targetRows: number | null;
+    earliestAt: string | null;
+    latestAt: string | null;
+    gaps: number | null;
+    conflicts: number | null;
+    snapshotSha256: string | null;
+    lastErrorType: string | null;
+    syncState: "idle" | "running" | "complete" | "failed";
+    updatedAt: string | null;
+  };
+  training?: {
+    stage: "idle" | "syncing" | "snapshotting" | "feature_build" | "walk_forward" | "final_fit" | "registering" | "completed" | "failed";
+    progress: number | null;
+    cpuPercent: number | null;
+    memoryMb: number | null;
+    elapsedSeconds: number | null;
+    nextRunAt: string | null;
+  };
+  walkForward?: Record<string, FoldMetric[]>;
+}
+
 export interface MLModelSummary {
   modelId: string;
   artifactSha256: string;
@@ -235,6 +344,9 @@ export interface LongRunPosition {
 export interface SupervisorModelReview {
   modelId: string;
   artifactSha256: string;
+  trainingConfigSha256: string | null;
+  comparisonBaselineModelId: string | null;
+  comparisonBaselineCohort: string | null;
   state: MLModelSummary["state"];
   trainer: string;
   createdAt: string;
@@ -244,13 +356,19 @@ export interface SupervisorModelReview {
   comparisonFailures: string[];
   metrics: null | {
     aggregateAccuracy: number;
+    benchmarkCohortId: string | null;
+    evaluationDatasetSha256: string;
     evaluationMode: string;
     folds: number;
     maxDrawdown: number;
+    marketSnapshotSha256: string | null;
     netReturn: number;
     oosRows: number;
     reportSha256: string;
     roundTripCostBps: number;
+    splitProtocolSha256: string | null;
+    testFrom: string;
+    testThrough: string;
     trades: number;
     worstFoldNetReturn: number;
   };
@@ -284,7 +402,49 @@ export interface LongRunStatus {
     status: "running" | "completed" | "failed";
     modelId: string | null;
     errorType: string | null;
+    phase: "syncing" | "snapshotting" | "feature_build" | "walk_forward" | "final_fit" | "registering" | "completed" | "failed";
+    progressCurrent: number;
+    progressTotal: number | null;
+    snapshotId: string | null;
+    dataRows: number | null;
     result: Record<string, unknown> | null;
+  };
+  dataWarehouse: {
+    backfillComplete: boolean;
+    bar: string;
+    coverageDays: number;
+    cursorTsMs: number | null;
+    diskBytes: number;
+    expectedRows: number;
+    firstOpenAt: string | null;
+    firstOpenTsMs: number | null;
+    instrument: string;
+    lastErrorType: string | null;
+    lastClosedAt: string | null;
+    lastOpenAt: string | null;
+    lastOpenTsMs: number | null;
+    lastSyncAt: string | null;
+    latestSnapshot: null | {
+      schemaVersion: string;
+      source: string;
+      instrument: string;
+      bar: string;
+      firstOpenAt: string;
+      lastOpenAt: string;
+      rowCount: number;
+      snapshotId: string;
+      contentSha256: string;
+      featureContractSha256: string;
+      createdAt: string;
+    };
+    missingBars: number;
+    pagesFetched: number;
+    rowsInserted: number;
+    schemaVersion: string;
+    source: string;
+    storedRows: number;
+    syncStatus: "idle" | "syncing" | "partial" | "error";
+    unresolvedConflicts: number;
   };
   recentDecisions: Array<{
     decisionId: string;

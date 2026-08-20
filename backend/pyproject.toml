@@ -4,13 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "okx-demo-lab"
-version = "0.3.0"
-description = "Demo-only local OKX spot research terminal"
+version = "0.4.0"
+license = "MIT"
+description = "MOHENG local OKX spot research, guarded Demo automation and Live manual trading terminal"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "keyring>=25.6,<26",
+  "numpy>=2,<3",
   "uvicorn[standard]>=0.35,<1",
 ]
 

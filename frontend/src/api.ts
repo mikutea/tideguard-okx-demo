@@ -2,6 +2,12 @@ import type {
   AccountData,
   AuditEvent,
   DemoOrder,
+  EnvironmentChallenge,
+  EnvironmentAcknowledgements,
+  EnvironmentTarget,
+  EnvironmentPreflight,
+  EnvironmentStatus,
+  EnvironmentSwitchResult,
   MarketData,
   LongRunStatus,
   MLStatus,
@@ -42,7 +48,7 @@ export const api = {
   getAudit: (limit = 50) =>
     request<{ chainValid: boolean; events: AuditEvent[] }>(`/api/v1/audit?limit=${limit}`),
   testConnection: () =>
-    request<{ public: boolean; private: boolean; environment: string }>("/api/v1/connection/test", {
+    request<{ public: boolean; private: boolean; privateReachable: boolean; policyValid: boolean; policyReason: string | null; environment: string }>("/api/v1/connection/test", {
       method: "POST"
     }),
   arm: (confirmation: string) =>
@@ -124,5 +130,27 @@ export const api = {
     request<LongRunStatus["state"]>("/api/v1/autonomy/master/disable", {
       method: "POST",
       body: JSON.stringify({ reason })
+    }),
+  getEnvironmentStatus: () =>
+    request<EnvironmentStatus>("/api/v1/environment/status"),
+  preflightEnvironmentSwitch: (target: EnvironmentTarget) =>
+    request<EnvironmentPreflight>("/api/v1/environment/preflight", {
+      method: "POST",
+      body: JSON.stringify({ target })
+    }),
+  challengeEnvironmentSwitch: (target: EnvironmentTarget) =>
+    request<EnvironmentChallenge>("/api/v1/environment/challenge", {
+      method: "POST",
+      body: JSON.stringify({ target })
+    }),
+  confirmEnvironmentSwitch: (
+    target: EnvironmentTarget,
+    nonce: string,
+    confirmation: string,
+    acknowledgements: EnvironmentAcknowledgements
+  ) =>
+    request<EnvironmentSwitchResult>("/api/v1/environment/confirm", {
+      method: "POST",
+      body: JSON.stringify({ target, nonce, confirmation, acknowledgements })
     })
 };

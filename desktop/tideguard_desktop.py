@@ -17,7 +17,9 @@ from types import ModuleType
 from typing import Any
 
 
-APP_NAME = "Tideguard"
+APP_NAME = "Tideguard"  # Stable internal identity used by health checks and data paths.
+PUBLIC_APP_NAME = "墨衡 MOHENG"
+APP_VERSION = "0.4.0"
 UI_MUTEX = r"Local\Tideguard.Desktop.2d2663b4-03de-4f3d-bc77-12556deba51f"
 APP_MUTEX = UI_MUTEX
 BACKEND_MUTEX = r"Local\Tideguard.Backend.2d2663b4-03de-4f3d-bc77-12556deba51f"
@@ -101,7 +103,7 @@ class SingleInstance:
             raise DesktopStartupError("无法创建单实例锁")
         if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
             kernel32.CloseHandle(handle)
-            raise AlreadyRunningError("Tideguard 已经在运行")
+            raise AlreadyRunningError("墨衡已经在运行")
         self._kernel32 = kernel32
         self._handle = int(handle)
 
@@ -125,7 +127,8 @@ class BackendStopSignal:
     EVENT_MODIFY_STATE = 0x0002
     SYNCHRONIZE = 0x00100000
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = BACKEND_STOP_EVENT) -> None:
+        self._name = name
         self._handle: int | None = None
         self._kernel32: Any | None = None
 
@@ -143,7 +146,7 @@ class BackendStopSignal:
         kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint]
         kernel32.WaitForSingleObject.restype = ctypes.c_uint
         kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        handle = kernel32.CreateEventW(None, True, False, BACKEND_STOP_EVENT)
+        handle = kernel32.CreateEventW(None, True, False, self._name)
         if not handle:
             raise DesktopStartupError("无法创建后台停止事件")
         self._kernel32 = kernel32
@@ -161,7 +164,7 @@ class BackendStopSignal:
         )
 
     @classmethod
-    def signal(cls) -> bool:
+    def signal(cls, name: str = BACKEND_STOP_EVENT) -> bool:
         if os.name != "nt":  # pragma: no cover
             return False
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -170,7 +173,7 @@ class BackendStopSignal:
         kernel32.SetEvent.argtypes = [ctypes.c_void_p]
         kernel32.SetEvent.restype = ctypes.c_bool
         kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        handle = kernel32.OpenEventW(cls.EVENT_MODIFY_STATE, False, BACKEND_STOP_EVENT)
+        handle = kernel32.OpenEventW(cls.EVENT_MODIFY_STATE, False, name)
         if not handle:
             return False
         try:
@@ -197,7 +200,7 @@ def _resource_root() -> Path:
 def _frontend_dist() -> Path:
     dist = (_resource_root() / "frontend" / "dist").resolve()
     if not dist.is_dir() or not (dist / "index.html").is_file():
-        raise DesktopStartupError("桌面前端资源缺失，请重新安装 Tideguard")
+        raise DesktopStartupError("桌面前端资源缺失，请重新安装墨衡 MOHENG")
     return dist
 
 
@@ -252,8 +255,8 @@ def _probe_backend(url: str = BACKEND_URL, *, timeout: float = 0.75) -> bool:
         isinstance(payload, dict)
         and payload.get("status") == "ok"
         and payload.get("app") == APP_NAME
-        and payload.get("environment") == "demo"
-        and payload.get("version") == "0.3.0"
+        and payload.get("environment") in {"demo", "live"}
+        and payload.get("version") == APP_VERSION
     )
 
 
@@ -356,21 +359,33 @@ class CredentialManagerApi:
             "message": f"Windows Credential Manager 操作失败（{type(exc).__name__}）",
         }
 
-    def status(self) -> dict[str, object]:
+    @staticmethod
+    def _environment(value: object) -> str:
+        if value not in {"demo", "live"}:
+            raise ValueError("credential environment must be demo or live")
+        return str(value)
+
+    def status(self, environment: object = "demo") -> dict[str, object]:
         try:
             from okx_demo_lab.secrets import get_credentials
 
-            configured = get_credentials() is not None
+            selected = self._environment(environment)
+            configured = get_credentials(selected) is not None
             return {
                 "ok": True,
                 "configured": configured,
+                "environment": selected,
                 "message": "已配置" if configured else "尚未配置",
             }
         except BaseException as exc:
             return self._failure(exc)
 
     def save(
-        self, api_key: object, api_secret: object, passphrase: object
+        self,
+        api_key: object,
+        api_secret: object,
+        passphrase: object,
+        environment: object = "demo",
     ) -> dict[str, object]:
         try:
             from okx_demo_lab.secrets import Credentials, set_credentials
@@ -380,29 +395,44 @@ class CredentialManagerApi:
                 for value in (api_key, api_secret, passphrase)
             ):
                 raise ValueError("invalid credential field type")
-            set_credentials(Credentials(api_key, api_secret, passphrase))
+            selected = self._environment(environment)
+            set_credentials(Credentials(api_key, api_secret, passphrase), selected)
             return {
                 "ok": True,
                 "configured": True,
+                "environment": selected,
                 "message": "凭证已安全保存",
             }
         except BaseException as exc:
             return self._failure(exc)
 
-    def remove(self, confirmation: object) -> dict[str, object]:
-        if confirmation != "DELETE-DEMO-CREDENTIALS":
+    def remove(
+        self, confirmation: object, environment: object = "demo"
+    ) -> dict[str, object]:
+        try:
+            selected = self._environment(environment)
+        except BaseException as exc:
+            return self._failure(exc)
+        required = (
+            "DELETE-DEMO-CREDENTIALS"
+            if selected == "demo"
+            else "DELETE-LIVE-CREDENTIALS"
+        )
+        if confirmation != required:
             return {
                 "ok": False,
                 "configured": True,
+                "environment": selected,
                 "message": "确认短语不匹配，未删除",
             }
         try:
             from okx_demo_lab.secrets import delete_credentials
 
-            delete_credentials()
+            delete_credentials(selected)
             return {
                 "ok": True,
                 "configured": False,
+                "environment": selected,
                 "message": "凭证已删除",
             }
         except BaseException as exc:
@@ -415,46 +445,56 @@ _CREDENTIALS_HTML = r"""
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Tideguard 凭证管理</title>
+  <title>墨衡凭证管理</title>
   <style>
-    :root { color-scheme: dark; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+    :root { color-scheme: dark; font-family: Inter, "Segoe UI", "Microsoft YaHei UI", sans-serif; }
     * { box-sizing: border-box; }
-    body { margin: 0; background: #07111f; color: #e9f1ff; }
-    main { max-width: 620px; margin: 0 auto; padding: 30px; }
-    .eyebrow { color: #52d3b8; font-size: 12px; font-weight: 700; letter-spacing: .16em; }
-    h1 { margin: 8px 0; font-size: 28px; }
-    .note { color: #9eb0ca; line-height: 1.65; margin: 0 0 22px; }
-    .card { background: #0d1b2d; border: 1px solid #20344f; border-radius: 18px; padding: 22px; box-shadow: 0 18px 45px #0006; }
-    label { display: block; margin: 14px 0 6px; color: #b8c7dd; font-size: 13px; }
-    input { width: 100%; border: 1px solid #29415f; border-radius: 10px; padding: 12px; background: #081524; color: #fff; outline: none; }
-    input:focus { border-color: #52d3b8; box-shadow: 0 0 0 3px #52d3b822; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 50% -20%, #17324a 0, #08121b 46%, #050a10 100%); color: #e8efec; }
+    main { max-width: 700px; margin: 0 auto; padding: 28px; }
+    header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+    header img { width: 58px; height: 58px; border-radius: 14px; }
+    .eyebrow { color: #7ed6c4; font-size: 11px; font-weight: 750; letter-spacing: .18em; }
+    h1 { margin: 4px 0 0; font-size: 26px; font-weight: 680; letter-spacing: .04em; }
+    .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+    .tab { min-height: 46px; border: 1px solid #274152; background: #0b1822; color: #a9bbc2; }
+    .tab.active { border-color: #7ed6c4; color: #e8f8f3; background: #143129; }
+    .tab.live.active { border-color: #d75b51; color: #ffe2dd; background: #3a1717; }
+    .note { color: #9eb0b5; line-height: 1.65; margin: 0 0 18px; font-size: 13px; }
+    .warning { display: none; margin-bottom: 14px; padding: 13px 14px; border: 1px solid #873d38; border-radius: 10px; background: #2e1414; color: #ffd5cf; line-height: 1.55; font-size: 13px; }
+    .warning.visible { display: block; }
+    .card { background: #0b161fdd; border: 1px solid #223947; border-radius: 14px; padding: 22px; box-shadow: 0 20px 60px #0007; }
+    label { display: block; margin: 14px 0 6px; color: #bdc9c8; font-size: 13px; }
+    input { width: 100%; min-height: 44px; border: 1px solid #294554; border-radius: 9px; padding: 11px 12px; background: #061019; color: #fff; outline: none; }
+    input:focus { border-color: #7ed6c4; box-shadow: 0 0 0 3px #7ed6c422; }
     .actions { display: flex; gap: 10px; margin-top: 18px; }
-    button { border: 0; border-radius: 10px; padding: 11px 17px; font-weight: 700; cursor: pointer; }
+    button { min-height: 44px; border: 0; border-radius: 9px; padding: 11px 17px; font-weight: 700; cursor: pointer; }
     button:disabled { opacity: .55; cursor: wait; }
-    .primary { background: #52d3b8; color: #06151a; }
-    .danger { background: #3a1b27; color: #ffb7c5; }
-    .status { margin-top: 18px; border-radius: 10px; padding: 12px; background: #091725; color: #aebed4; min-height: 44px; }
-    .delete { border-top: 1px solid #20344f; margin-top: 24px; padding-top: 18px; }
-    code { color: #ffb7c5; }
+    .primary { background: #7ed6c4; color: #061511; }
+    .primary.live { background: #d75b51; color: #fff; }
+    .danger { background: transparent; border: 1px solid #6f3331; color: #ffaaa2; }
+    .status { margin-top: 18px; border-radius: 9px; padding: 12px; border: 1px solid #203945; background: #07131c; color: #b2c1c1; min-height: 44px; }
+    .delete { border-top: 1px solid #203945; margin-top: 24px; padding-top: 18px; }
+    code { color: #e8b56d; }
   </style>
 </head>
 <body>
 <main>
-  <div class="eyebrow">WINDOWS CREDENTIAL MANAGER</div>
-  <h1>OKX Demo 凭证</h1>
-  <p class="note">秘密只写入当前 Windows 用户的凭证管理器，不经过 Tideguard 本地 HTTP 服务，也不会进入安装包、日志或项目文件。</p>
+  <header><img src="__MOHENG_ICON__" alt=""><div><div class="eyebrow">MOHENG · WINDOWS CREDENTIAL MANAGER</div><h1>墨衡凭证管理</h1></div></header>
+  <div class="tabs" role="tablist"><button class="tab active" data-env="demo" type="button">OKX 模拟盘</button><button class="tab live" data-env="live" type="button">OKX 实盘</button></div>
+  <p class="note">Demo 与 Live 凭证完全隔离，只写入当前 Windows 用户的凭证管理器；不会经过墨衡本地 HTTP 服务，也不会进入安装包、日志或项目文件。</p>
+  <div id="live-warning" class="warning"><strong>真实资金凭证</strong><br>仅创建 Read + Trade、禁 Withdraw、绑定固定公网 IP 的独立 API Key。OKX 的 Trade 权限还可能包含转账和配置写操作，因此请使用独立子账户和严格资金上限。</div>
   <section class="card">
     <form id="save-form" autocomplete="off">
-      <label for="api-key">OKX Demo API Key</label>
+      <label id="api-key-label" for="api-key">OKX Demo API Key</label>
       <input id="api-key" type="password" autocomplete="new-password" spellcheck="false" required>
-      <label for="api-secret">OKX Demo Secret</label>
+      <label id="secret-label" for="api-secret">OKX Demo Secret</label>
       <input id="api-secret" type="password" autocomplete="new-password" spellcheck="false" required>
-      <label for="passphrase">OKX Demo Passphrase</label>
+      <label id="passphrase-label" for="passphrase">OKX Demo Passphrase</label>
       <input id="passphrase" type="password" autocomplete="new-password" spellcheck="false" required>
       <div class="actions"><button id="save" class="primary" type="submit">安全保存</button></div>
     </form>
     <div class="delete">
-      <label for="confirmation">删除时输入 <code>DELETE-DEMO-CREDENTIALS</code></label>
+      <label for="confirmation">删除时输入 <code id="delete-phrase">DELETE-DEMO-CREDENTIALS</code></label>
       <input id="confirmation" type="text" autocomplete="off" spellcheck="false">
       <div class="actions"><button id="remove" class="danger" type="button">删除本机凭证</button></div>
     </div>
@@ -465,16 +505,33 @@ _CREDENTIALS_HTML = r"""
   const statusNode = document.getElementById('status');
   const saveButton = document.getElementById('save');
   const removeButton = document.getElementById('remove');
+  let environment = 'demo';
   function show(result) { statusNode.textContent = result.message || '操作已完成'; }
-  async function refresh() { show(await window.pywebview.api.status()); }
+  async function refresh() { show(await window.pywebview.api.status(environment)); }
+  function selectEnvironment(next) {
+    environment = next;
+    document.querySelectorAll('.tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.env === next));
+    const live = next === 'live';
+    document.getElementById('live-warning').classList.toggle('visible', live);
+    saveButton.classList.toggle('live', live);
+    document.getElementById('api-key-label').textContent = `OKX ${live ? 'Live' : 'Demo'} API Key`;
+    document.getElementById('secret-label').textContent = `OKX ${live ? 'Live' : 'Demo'} Secret`;
+    document.getElementById('passphrase-label').textContent = `OKX ${live ? 'Live' : 'Demo'} Passphrase`;
+    document.getElementById('delete-phrase').textContent = live ? 'DELETE-LIVE-CREDENTIALS' : 'DELETE-DEMO-CREDENTIALS';
+    document.getElementById('save-form').reset();
+    document.getElementById('confirmation').value = '';
+    refresh();
+  }
   window.addEventListener('pywebviewready', refresh);
+  document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => selectEnvironment(tab.dataset.env)));
   document.getElementById('save-form').addEventListener('submit', async (event) => {
     event.preventDefault(); saveButton.disabled = true;
     try {
       const result = await window.pywebview.api.save(
         document.getElementById('api-key').value,
         document.getElementById('api-secret').value,
-        document.getElementById('passphrase').value
+        document.getElementById('passphrase').value,
+        environment
       );
       show(result);
       if (result.ok) event.target.reset();
@@ -484,7 +541,7 @@ _CREDENTIALS_HTML = r"""
   removeButton.addEventListener('click', async () => {
     removeButton.disabled = true;
     try {
-      const result = await window.pywebview.api.remove(document.getElementById('confirmation').value);
+      const result = await window.pywebview.api.remove(document.getElementById('confirmation').value, environment);
       show(result);
       if (result.ok) document.getElementById('confirmation').value = '';
     } catch (_) { statusNode.textContent = '凭证删除失败'; }
@@ -499,14 +556,23 @@ _CREDENTIALS_HTML = r"""
 def _run_credentials_window() -> int:
     import webview
 
+    icon_path = _resource_root() / "assets" / "brand" / "moheng-app-icon.png"
+    if not icon_path.is_file():
+        raise DesktopStartupError("墨衡品牌资源缺失，请重新安装")
+    icon_data = base64.b64encode(icon_path.read_bytes()).decode("ascii")
+    credential_html = _CREDENTIALS_HTML.replace(
+        "__MOHENG_ICON__", f"data:image/png;base64,{icon_data}"
+    )
+
     webview.create_window(
-        "Tideguard 凭证管理",
-        html=_CREDENTIALS_HTML,
+        "墨衡凭证管理",
+        html=credential_html,
         js_api=CredentialManagerApi(),
-        width=640,
-        height=690,
-        resizable=False,
-        background_color="#07111f",
+        width=720,
+        height=800,
+        min_size=(640, 720),
+        resizable=True,
+        background_color="#071018",
     )
     webview.start(gui="edgechromium", debug=False)
     return 0
@@ -630,7 +696,7 @@ def run(argv: list[str] | None = None) -> int:
         import webview
 
         webview.create_window(
-            APP_NAME,
+            PUBLIC_APP_NAME,
             local_url,
             width=WINDOW_SIZE[0],
             height=WINDOW_SIZE[1],
@@ -640,14 +706,14 @@ def run(argv: list[str] | None = None) -> int:
         webview.start(gui="edgechromium", debug=False)
         return 0
     except AlreadyRunningError:
-        _show_error(APP_NAME, "Tideguard 已经在运行。请切换到现有窗口。")
+        _show_error(PUBLIC_APP_NAME, "墨衡已经在运行。请切换到现有窗口。")
         return 2
     except BaseException as exc:
         error_type = type(exc).__name__
         logger.error("Desktop startup failed: %s", error_type)
         _show_error(
-            f"{APP_NAME} 启动失败",
-            "无法启动 Tideguard 桌面窗口。请确认 Microsoft Edge WebView2 Runtime "
+            f"{PUBLIC_APP_NAME} 启动失败",
+            "无法启动墨衡桌面窗口。请确认 Microsoft Edge WebView2 Runtime "
             f"可用后重试。错误类型：{error_type}\n日志：{log_path}",
         )
         return 1

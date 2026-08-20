@@ -13,7 +13,8 @@ from typing import Any, Mapping
 
 DEMO_ENVIRONMENT = "okx_demo"
 ALLOWED_INSTRUMENT = "BTC-USDT"
-MODEL_SCHEMA_VERSION = "tideguard.linear-logit.v1"
+LEGACY_MODEL_SCHEMA_VERSION = "tideguard.linear-logit.v1"
+MODEL_SCHEMA_VERSION = "tideguard.linear-logit.v2"
 MAX_ARTIFACT_BYTES = 1_000_000
 MAX_FEATURES = 256
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -211,6 +212,11 @@ class ModelManifest:
     random_seed: int
     feature_schema_sha256: str
     model_family: str = "linear_logit"
+    fit_dataset_sha256: str | None = None
+    fit_rows: int | None = None
+    benchmark_cohort_id: str | None = None
+    market_snapshot_sha256: str | None = None
+    split_protocol_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -238,9 +244,44 @@ class ModelManifest:
             or not 0 <= self.random_seed <= 2**32 - 1
         ):
             raise ModelArtifactError("random_seed is outside the supported range")
+        v2_present = any(
+            value is not None
+            for value in (
+                self.fit_dataset_sha256,
+                self.fit_rows,
+                self.benchmark_cohort_id,
+                self.market_snapshot_sha256,
+                self.split_protocol_sha256,
+            )
+        )
+        if v2_present:
+            if self.fit_dataset_sha256 is None or self.fit_rows is None:
+                raise ModelArtifactError("v2 manifest requires a bound final-fit dataset")
+            _require_hash("fit_dataset_sha256", self.fit_dataset_sha256)
+            if isinstance(self.fit_rows, bool) or self.fit_rows < 2:
+                raise ModelArtifactError("v2 manifest final-fit row count is invalid")
+            cohort_values = (
+                self.benchmark_cohort_id,
+                self.market_snapshot_sha256,
+                self.split_protocol_sha256,
+            )
+            if any(value is not None for value in cohort_values) and not all(
+                value is not None for value in cohort_values
+            ):
+                raise ModelArtifactError("v2 manifest cohort binding is incomplete")
+            if self.benchmark_cohort_id is not None:
+                suffix = self.benchmark_cohort_id.removeprefix("cohort_")
+                if (
+                    not self.benchmark_cohort_id.startswith("cohort_")
+                    or not 8 <= len(suffix) <= 64
+                    or any(character not in "0123456789abcdef" for character in suffix)
+                ):
+                    raise ModelArtifactError("v2 manifest cohort ID is invalid")
+                _require_hash("market_snapshot_sha256", str(self.market_snapshot_sha256))
+                _require_hash("split_protocol_sha256", str(self.split_protocol_sha256))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value: dict[str, Any] = {
             "code_revision": self.code_revision,
             "created_at": _iso(self.created_at),
             "dataset_sha256": self.dataset_sha256,
@@ -253,10 +294,21 @@ class ModelManifest:
             "training_config_sha256": self.training_config_sha256,
             "validation_run_id": self.validation_run_id,
         }
+        if self.fit_dataset_sha256 is not None:
+            value.update(
+                {
+                    "benchmark_cohort_id": self.benchmark_cohort_id,
+                    "fit_dataset_sha256": self.fit_dataset_sha256,
+                    "fit_rows": self.fit_rows,
+                    "market_snapshot_sha256": self.market_snapshot_sha256,
+                    "split_protocol_sha256": self.split_protocol_sha256,
+                }
+            )
+        return value
 
     @classmethod
     def from_dict(cls, value: Any) -> ModelManifest:
-        expected = {
+        legacy_expected = {
             "code_revision",
             "created_at",
             "dataset_sha256",
@@ -269,16 +321,43 @@ class ModelManifest:
             "training_config_sha256",
             "validation_run_id",
         }
-        if not isinstance(value, dict) or set(value) != expected:
+        v2_expected = legacy_expected | {
+            "benchmark_cohort_id",
+            "fit_dataset_sha256",
+            "fit_rows",
+            "market_snapshot_sha256",
+            "split_protocol_sha256",
+        }
+        fields = frozenset(value) if isinstance(value, dict) else frozenset()
+        if not isinstance(value, dict) or fields not in {
+            frozenset(legacy_expected),
+            frozenset(v2_expected),
+        }:
             raise ModelArtifactError("manifest has missing or unexpected fields")
+        is_v2 = set(value) == v2_expected
         if isinstance(value["random_seed"], bool) or not isinstance(value["random_seed"], int):
             raise ModelArtifactError("manifest random_seed must be an integer")
+        if is_v2 and (
+            isinstance(value["fit_rows"], bool)
+            or not isinstance(value["fit_rows"], int)
+        ):
+            raise ModelArtifactError("manifest fit_rows must be an integer")
         if any(
             not isinstance(value[key], str)
-            for key in expected
+            for key in legacy_expected
             if key != "random_seed"
         ):
             raise ModelArtifactError("manifest fields have invalid value types")
+        if is_v2:
+            if not isinstance(value["fit_dataset_sha256"], str):
+                raise ModelArtifactError("manifest fit dataset hash is invalid")
+            for key in (
+                "benchmark_cohort_id",
+                "market_snapshot_sha256",
+                "split_protocol_sha256",
+            ):
+                if value[key] is not None and not isinstance(value[key], str):
+                    raise ModelArtifactError("manifest cohort fields have invalid value types")
         try:
             return cls(
                 dataset_sha256=str(value["dataset_sha256"]),
@@ -292,6 +371,17 @@ class ModelManifest:
                 random_seed=int(value["random_seed"]),
                 feature_schema_sha256=str(value["feature_schema_sha256"]),
                 model_family=str(value["model_family"]),
+                fit_dataset_sha256=(
+                    str(value["fit_dataset_sha256"]) if is_v2 else None
+                ),
+                fit_rows=int(value["fit_rows"]) if is_v2 else None,
+                benchmark_cohort_id=(value["benchmark_cohort_id"] if is_v2 else None),
+                market_snapshot_sha256=(
+                    value["market_snapshot_sha256"] if is_v2 else None
+                ),
+                split_protocol_sha256=(
+                    value["split_protocol_sha256"] if is_v2 else None
+                ),
             )
         except ModelArtifactError:
             raise
@@ -303,18 +393,33 @@ class ModelManifest:
 class FrozenModelBundle:
     manifest: ModelManifest
     model: FrozenLinearModel
+    schema_version: str | None = None
 
     def __post_init__(self) -> None:
         expected = feature_schema_hash(self.model.feature_names)
         if not hmac.compare_digest(expected, self.manifest.feature_schema_sha256):
             raise ModelArtifactError("manifest feature schema does not match the model")
+        inferred = (
+            MODEL_SCHEMA_VERSION
+            if self.manifest.fit_dataset_sha256 is not None
+            else LEGACY_MODEL_SCHEMA_VERSION
+        )
+        if self.schema_version is None:
+            object.__setattr__(self, "schema_version", inferred)
+        elif self.schema_version not in {
+            LEGACY_MODEL_SCHEMA_VERSION,
+            MODEL_SCHEMA_VERSION,
+        }:
+            raise ModelArtifactError("unsupported artifact schema version")
+        if self.schema_version != inferred:
+            raise ModelArtifactError("artifact schema and manifest fields do not match")
 
     def to_bytes(self) -> bytes:
         return canonical_json(
             {
                 "manifest": self.manifest.to_dict(),
                 "model": self.model.to_dict(),
-                "schema_version": MODEL_SCHEMA_VERSION,
+                "schema_version": self.schema_version,
             }
         ).encode("utf-8")
 
@@ -347,11 +452,15 @@ class FrozenModelBundle:
             "schema_version",
         }:
             raise ModelArtifactError("artifact has missing or unexpected fields")
-        if value["schema_version"] != MODEL_SCHEMA_VERSION:
+        if value["schema_version"] not in {
+            LEGACY_MODEL_SCHEMA_VERSION,
+            MODEL_SCHEMA_VERSION,
+        }:
             raise ModelArtifactError("unsupported artifact schema version")
         bundle = cls(
             manifest=ModelManifest.from_dict(value["manifest"]),
             model=FrozenLinearModel.from_dict(value["model"]),
+            schema_version=str(value["schema_version"]),
         )
         if bundle.to_bytes() != raw:
             raise ModelArtifactError("artifact is not in canonical form")

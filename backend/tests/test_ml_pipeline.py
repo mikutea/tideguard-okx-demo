@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+import numpy as np
 
 from okx_demo_lab.ml.execution import (
     AUTO_SESSION_CONFIRMATION,
@@ -24,6 +26,13 @@ from okx_demo_lab.ml.registry import (
     PromotionDenied,
     PromotionPolicy,
 )
+from okx_demo_lab.ml.pipeline import (
+    BAR_MILLISECONDS,
+    build_observations,
+    parse_completed_candles,
+    prepare_training_dataset,
+    train_and_register_candidate,
+)
 from okx_demo_lab.ml.strategy import (
     DemoStrategyPolicy,
     FrozenLinearModel,
@@ -37,6 +46,8 @@ from okx_demo_lab.ml.strategy import (
     feature_schema_hash,
 )
 from okx_demo_lab.ml.walk_forward import (
+    LEGACY_BRACKET_EVALUATION_MODE,
+    LEGACY_BRACKET_VALIDATION_SCHEMA_VERSION,
     LEGACY_LONG_ONLY_EVALUATION_MODE,
     LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION,
     LEGACY_VALIDATION_SCHEMA_VERSION,
@@ -46,6 +57,7 @@ from okx_demo_lab.ml.walk_forward import (
     ValidationReport,
     WalkForwardSpec,
     _evaluate_fold,
+    dataset_sha256,
     fit_linear_model,
     plan_walk_forward,
     run_walk_forward,
@@ -70,19 +82,56 @@ def observations(count: int = 72) -> tuple[Observation, ...]:
     return tuple(rows)
 
 
+class SyntheticCandles:
+    def __init__(self, count: int):
+        self.count = count
+        self.first = (
+            round(NOW.timestamp() * 1_000) - (count + 2) * BAR_MILLISECONDS
+        )
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __iter__(self):
+        for index in range(self.count):
+            timestamp = self.first + index * BAR_MILLISECONDS
+            close = 20_000.0 + index * 0.1 + (index % 17) * 0.05
+            yield [
+                str(timestamp),
+                str(close - 0.1),
+                str(close + 1.0),
+                str(close - 1.0),
+                str(close),
+                str(10 + index % 11),
+                "0",
+                "0",
+                "1",
+            ]
+
+
 def validation_and_bundle() -> tuple[object, FrozenModelBundle, tuple[Observation, ...], TrainingConfig]:
     rows = observations()
     config = TrainingConfig(epochs=120, round_trip_cost_bps=10)
     report = run_walk_forward(
         rows,
         ("signal",),
-        WalkForwardSpec(train_size=20, test_size=10, step_size=10),
+        WalkForwardSpec(
+            train_size=20,
+            test_size=10,
+            step_size=10,
+            label_horizon=2,
+            expanding=False,
+            benchmark_cohort_id="cohort_" + "1" * 24,
+            market_snapshot_sha256="2" * 64,
+        ),
         config,
         created_at=NOW,
     )
     model = fit_linear_model(rows, ("signal",), config)
     manifest = ModelManifest(
         dataset_sha256=report.dataset_sha256,
+        fit_dataset_sha256=dataset_sha256(rows, ("signal",)),
+        fit_rows=len(rows),
         training_config_sha256=report.training_config_sha256,
         validation_run_id=report.validation_run_id,
         code_revision="f" * 40,
@@ -92,6 +141,9 @@ def validation_and_bundle() -> tuple[object, FrozenModelBundle, tuple[Observatio
         trainer="offline-test",
         random_seed=7,
         feature_schema_sha256=report.feature_schema_sha256,
+        benchmark_cohort_id=report.benchmark_cohort_id,
+        market_snapshot_sha256=report.market_snapshot_sha256,
+        split_protocol_sha256=report.split_protocol_sha256,
     )
     return report, FrozenModelBundle(manifest=manifest, model=model), rows, config
 
@@ -175,6 +227,99 @@ def test_walk_forward_is_deterministic_and_charges_costs():
     assert first.round_trip_cost_bps == 15
 
 
+def test_numpy_prepared_dataset_matches_reference_feature_and_label_semantics():
+    raw = list(SyntheticCandles(120))
+    config = TrainingConfig(
+        epochs=5,
+        round_trip_cost_bps=24,
+        stop_loss_fraction=0.015,
+        take_profit_fraction=0.025,
+    )
+    reference = build_observations(
+        parse_completed_candles(raw, now=NOW),
+        label_horizon=12,
+        round_trip_cost_bps=24,
+        stop_loss_fraction=0.015,
+        take_profit_fraction=0.025,
+    )
+    prepared = prepare_training_dataset(raw, now=NOW, training_config=config)
+    matrix = prepared.observations
+    np.testing.assert_allclose(
+        matrix.features,
+        np.asarray([row.features for row in reference]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        matrix.forward_returns,
+        np.asarray([row.forward_return for row in reference]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert matrix.labels.tolist() == [row.label for row in reference]
+
+
+def test_100k_history_matrix_has_bounded_build_time_and_memory():
+    config = TrainingConfig(epochs=5, round_trip_cost_bps=24)
+    started = time.perf_counter()
+    prepared = prepare_training_dataset(
+        SyntheticCandles(100_000),
+        now=NOW,
+        training_config=config,
+    )
+    build_seconds = time.perf_counter() - started
+    matrix = prepared.observations
+    matrix_bytes = (
+        matrix.observed_at_ms.nbytes
+        + matrix.features.nbytes
+        + matrix.labels.nbytes
+        + matrix.forward_returns.nbytes
+    )
+    assert len(matrix) == 100_000 - 48 - 12
+    assert matrix_bytes < 20 * 1024 * 1024
+    assert build_seconds < 15
+
+    fit_started = time.perf_counter()
+    first = fit_linear_model(matrix, tuple(f"f{index}" for index in range(16)), config)
+    second = fit_linear_model(matrix, tuple(f"f{index}" for index in range(16)), config)
+    assert first == second
+    assert time.perf_counter() - fit_started < 15
+
+
+def test_v4_candidate_binds_snapshot_cohort_and_recent_final_fit(tmp_path):
+    raw = list(SyntheticCandles(140))
+    config = TrainingConfig(epochs=5, round_trip_cost_bps=24)
+    prepared = prepare_training_dataset(raw, now=NOW, training_config=config)
+    registry = ModelRegistry(tmp_path / "v4-registry.sqlite3")
+    result = train_and_register_candidate(
+        raw,
+        registry,
+        now=NOW,
+        code_revision="v4-test",
+        training_config=config,
+        walk_forward_spec=WalkForwardSpec(
+            train_size=20,
+            test_size=20,
+            step_size=20,
+            label_horizon=12,
+            expanding=False,
+            benchmark_cohort_id="cohort_" + "3" * 24,
+            market_snapshot_sha256="4" * 64,
+        ),
+        prepared_dataset=prepared,
+        final_fit_rows=30,
+    )
+    bundle = registry.load_model(result.model_id)
+    assert bundle.schema_version == "tideguard.linear-logit.v2"
+    assert bundle.manifest.fit_rows == 30
+    assert bundle.manifest.benchmark_cohort_id == "cohort_" + "3" * 24
+    assert bundle.manifest.market_snapshot_sha256 == "4" * 64
+    assert bundle.manifest.split_protocol_sha256 == result.report.split_protocol_sha256
+    assert bundle.manifest.trained_from == prepared.observations.observed_at(
+        len(prepared.observations) - 30
+    )
+
+
 class _FixedActionModel:
     def __init__(self, action: str):
         self.action_name = action
@@ -246,6 +391,12 @@ def test_long_only_oos_ignores_every_signal_inside_the_holding_window():
 def test_legacy_validation_remains_readable_but_cannot_be_promoted():
     report, _bundle, _rows, _config = validation_and_bundle()
     legacy_payload = report.to_dict()
+    for key in (
+        "benchmark_cohort_id",
+        "market_snapshot_sha256",
+        "split_protocol_sha256",
+    ):
+        legacy_payload["walk_forward_spec"].pop(key)
     legacy_payload["schema_version"] = LEGACY_VALIDATION_SCHEMA_VERSION
     legacy_payload.pop("evaluation_mode")
     legacy_report = ValidationReport.from_dict(legacy_payload)
@@ -254,11 +405,30 @@ def test_legacy_validation_remains_readable_but_cannot_be_promoted():
     assert "unsupported_evaluation_semantics" in PromotionPolicy().failures(legacy_report)
 
     v2_payload = report.to_dict()
+    for key in (
+        "benchmark_cohort_id",
+        "market_snapshot_sha256",
+        "split_protocol_sha256",
+    ):
+        v2_payload["walk_forward_spec"].pop(key)
     v2_payload["schema_version"] = LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION
     v2_payload["evaluation_mode"] = LEGACY_LONG_ONLY_EVALUATION_MODE
     v2_report = ValidationReport.from_dict(v2_payload)
     assert v2_report.to_dict() == v2_payload
     assert "unsupported_evaluation_semantics" in PromotionPolicy().failures(v2_report)
+
+    v3_payload = report.to_dict()
+    for key in (
+        "benchmark_cohort_id",
+        "market_snapshot_sha256",
+        "split_protocol_sha256",
+    ):
+        v3_payload["walk_forward_spec"].pop(key)
+    v3_payload["schema_version"] = LEGACY_BRACKET_VALIDATION_SCHEMA_VERSION
+    v3_payload["evaluation_mode"] = LEGACY_BRACKET_EVALUATION_MODE
+    v3_report = ValidationReport.from_dict(v3_payload)
+    assert v3_report.to_dict() == v3_payload
+    assert "unsupported_evaluation_semantics" in PromotionPolicy().failures(v3_report)
 
 
 def test_frozen_bundle_is_canonical_strict_and_tamper_evident():
@@ -276,6 +446,67 @@ def test_frozen_bundle_is_canonical_strict_and_tamper_evident():
     unsafe["intercept"] = float("nan")
     with pytest.raises(ModelArtifactError, match="non-finite"):
         FrozenLinearModel.from_dict(unsafe)
+
+
+def test_legacy_v1_model_artifact_remains_readable():
+    _report, bundle, _rows, _config = validation_and_bundle()
+    legacy_manifest = replace(
+        bundle.manifest,
+        fit_dataset_sha256=None,
+        fit_rows=None,
+        benchmark_cohort_id=None,
+        market_snapshot_sha256=None,
+        split_protocol_sha256=None,
+    )
+    legacy = FrozenModelBundle(manifest=legacy_manifest, model=bundle.model)
+    assert legacy.schema_version == "tideguard.linear-logit.v1"
+    assert FrozenModelBundle.from_bytes(legacy.to_bytes()) == legacy
+
+
+def test_legacy_v1_artifact_with_v3_report_cannot_receive_new_promotion(tmp_path):
+    report, bundle, _rows, _config = validation_and_bundle()
+    payload = report.to_dict()
+    for key in (
+        "benchmark_cohort_id",
+        "market_snapshot_sha256",
+        "split_protocol_sha256",
+    ):
+        payload["walk_forward_spec"].pop(key)
+    payload["schema_version"] = LEGACY_BRACKET_VALIDATION_SCHEMA_VERSION
+    payload["evaluation_mode"] = LEGACY_BRACKET_EVALUATION_MODE
+    legacy_report = ValidationReport.from_dict(payload)
+    legacy_manifest = replace(
+        bundle.manifest,
+        validation_run_id=legacy_report.validation_run_id,
+        fit_dataset_sha256=None,
+        fit_rows=None,
+        benchmark_cohort_id=None,
+        market_snapshot_sha256=None,
+        split_protocol_sha256=None,
+    )
+    legacy = FrozenModelBundle(manifest=legacy_manifest, model=bundle.model)
+    registry = ModelRegistry(tmp_path / "legacy-registry.sqlite3")
+    model_id = registry.register_candidate(legacy.to_bytes())
+    registry.record_validation(model_id, legacy_report, recorded_at=NOW)
+    with pytest.raises(PromotionDenied, match="legacy model artifacts"):
+        registry.promote(
+            model_id,
+            policy=PromotionPolicy(
+                min_folds=1,
+                min_oos_rows=1,
+                min_trades=0,
+                min_round_trip_cost_bps=1,
+                min_aggregate_accuracy=0,
+                min_aggregate_net_return=-1,
+                min_worst_fold_net_return=-0.99,
+                max_drawdown=1,
+            ),
+            reviewer="test",
+            rationale="Legacy artifacts stay readable but cannot receive a v4 promotion.",
+            confirmation=PROMOTION_CONFIRMATION,
+            expected_generation=0,
+            approved_at=NOW,
+        )
 
 
 def test_runtime_features_must_exactly_match_frozen_schema():

@@ -382,6 +382,20 @@ def test_training_and_daily_entry_claims_are_crash_visible(tmp_path):
     db = store(tmp_path)
     assert db.training_due(now=NOW, interval_hours=24) is True
     run_id = db.start_training(now=NOW)
+    db.update_training_progress(
+        run_id,
+        phase="walk_forward",
+        current=1,
+        total=3,
+        snapshot_id="dset_" + "a" * 24,
+        data_rows=905_000,
+    )
+    running = db.latest_training()
+    assert running and running["phase"] == "walk_forward"
+    assert running["progressCurrent"] == 1
+    assert running["progressTotal"] == 3
+    assert running["snapshotId"] == "dset_" + "a" * 24
+    assert running["dataRows"] == 905_000
     db.finish_training(
         run_id,
         model_id="mdl_" + "1" * 24,
@@ -389,6 +403,7 @@ def test_training_and_daily_entry_claims_are_crash_visible(tmp_path):
         error_type=None,
         now=NOW + timedelta(minutes=1),
     )
+    assert db.latest_training()["phase"] == "completed"
     assert db.training_due(now=NOW + timedelta(hours=23), interval_hours=24) is False
     assert db.training_due(now=NOW + timedelta(hours=25), interval_hours=24) is True
     assert db.claim_daily_entry(now=NOW, maximum=2) == 1
@@ -407,6 +422,7 @@ def test_crash_interrupted_training_is_failed_and_retried_on_short_interval(tmp_
     assert latest and latest["runId"] == run_id
     assert latest["status"] == "failed"
     assert latest["errorType"] == "ProcessRestart"
+    assert latest["phase"] == "failed"
     assert db.training_due(
         now=NOW + timedelta(minutes=30), interval_hours=24, retry_hours=1
     ) is False
@@ -426,3 +442,47 @@ def test_master_mode_cannot_change_while_position_is_active(tmp_path):
             confirmation=AUTONOMY_ENABLE_CONFIRMATION,
             now=NOW,
         )
+
+
+def test_v1_autonomy_database_migrates_training_progress_without_losing_runs(tmp_path):
+    path = tmp_path / "legacy-autonomy.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            """
+            CREATE TABLE autonomy_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                schema_version TEXT NOT NULL,
+                desired_mode TEXT NOT NULL,
+                runtime_status TEXT NOT NULL,
+                credential_fingerprint TEXT,
+                account_fingerprint TEXT,
+                suspended_reason TEXT,
+                state_version INTEGER NOT NULL,
+                enabled_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO autonomy_state VALUES
+                (1, 'tideguard.autonomy.v1', 'disabled', 'disabled',
+                 NULL, NULL, NULL, 0, NULL, '2026-08-20T00:00:00.000Z');
+            CREATE TABLE training_runs (
+                run_id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                status TEXT NOT NULL,
+                model_id TEXT,
+                error_type TEXT,
+                result_json TEXT
+            );
+            INSERT INTO training_runs VALUES
+                ('train_legacy', '2026-08-20T00:00:00.000Z',
+                 '2026-08-20T00:01:00.000Z', 'completed',
+                 'mdl_legacy', NULL, '{"ok":true}');
+            """
+        )
+    migrated = AutonomyStore(path)
+    assert migrated.summary()["schemaVersion"] == "tideguard.autonomy.v2"
+    latest = migrated.latest_training()
+    assert latest and latest["runId"] == "train_legacy"
+    assert latest["phase"] == "completed"
+    assert latest["progressCurrent"] == 0
+    assert latest["snapshotId"] is None

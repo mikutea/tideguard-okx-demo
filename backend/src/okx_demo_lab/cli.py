@@ -7,9 +7,11 @@ import sys
 from datetime import datetime, timezone
 
 from .audit import AuditStore
-from .config import app_data_dir
+from .config import ENVIRONMENT_SELECTOR_FILE, app_data_dir
+from .environment import EnvironmentSelectionStore, RuntimeEnvironment
 from .ml.autonomy import AutonomyPolicy, AutonomyStore, SupervisorDenied
 from .ml.long_run import LONG_RUN_PROMOTION_POLICY
+from .ml.market_data import MarketDataStore
 from .ml.registry import ModelRegistry, PromotionDenied, RegistryError
 from .ml.supervisor import CodexSupervisor
 from .secrets import (
@@ -19,27 +21,37 @@ from .secrets import (
     delete_credentials,
     set_credentials,
 )
+from .profile import EnvironmentProfile, profile_for
 
 
-def _credentials_set() -> int:
+def _credentials_set(profile: EnvironmentProfile) -> int:
     print("凭证只会写入当前 Windows 用户的 Credential Manager。")
     print("输入不会回显；不要在聊天、截图或项目文件中保存这些值。")
-    api_key = getpass.getpass("OKX Demo API Key: ")
-    api_secret = getpass.getpass("OKX Demo Secret: ")
-    passphrase = getpass.getpass("OKX Demo Passphrase: ")
-    set_credentials(Credentials(api_key, api_secret, passphrase))
-    print("已安全保存。程序只会以模拟盘标头使用这些凭证。")
+    api_key = getpass.getpass(f"{profile.display_name} API Key: ")
+    api_secret = getpass.getpass(f"{profile.display_name} Secret: ")
+    passphrase = getpass.getpass(f"{profile.display_name} Passphrase: ")
+    set_credentials(Credentials(api_key, api_secret, passphrase), profile)
+    header_note = "模拟盘标头" if profile.simulated_trading else "无模拟盘标头"
+    print(f"已安全保存到 {profile.credential_service}；该 profile 固定使用{header_note}。")
     return 0
 
 
 def _supervisor() -> CodexSupervisor:
-    data_dir = app_data_dir()
+    data_root = app_data_dir()
+    runtime = RuntimeEnvironment(
+        EnvironmentSelectionStore(data_root / ENVIRONMENT_SELECTOR_FILE)
+    )
+    if runtime.active_profile.name == "live":
+        raise SupervisorDenied("Live 不能复用 Demo Codex Supervisor 授权")
+    data_dir = runtime.active_profile.runtime_data_dir(data_root)
+    market_data = MarketDataStore(data_root / "market-data.sqlite3")
     return CodexSupervisor(
         registry=ModelRegistry(data_dir / "ml-registry.sqlite3"),
         autonomy=AutonomyStore(data_dir / "autonomy.sqlite3"),
         audit=AuditStore(data_dir / "state.sqlite3"),
         promotion_policy=LONG_RUN_PROMOTION_POLICY,
         autonomy_policy=AutonomyPolicy(),
+        market_snapshot_validator=market_data.snapshot_is_current,
     )
 
 
@@ -52,9 +64,11 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     credentials = sub.add_parser("credentials", help="管理 Windows Credential Manager 凭证")
     credential_sub = credentials.add_subparsers(dest="credential_command", required=True)
-    credential_sub.add_parser("set")
-    credential_sub.add_parser("status")
-    credential_sub.add_parser("delete")
+    for command in ("set", "status", "delete"):
+        credential_parser = credential_sub.add_parser(command)
+        credential_parser.add_argument(
+            "--environment", choices=("demo", "live"), default="demo"
+        )
     supervisor = sub.add_parser(
         "supervisor", help="Codex 脱敏模型审查与长期 Demo lease"
     )
@@ -83,17 +97,20 @@ def main() -> int:
 
     try:
         if args.command == "credentials":
+            profile = profile_for(args.environment)
             if args.credential_command == "set":
-                return _credentials_set()
+                return _credentials_set(profile)
             if args.credential_command == "status":
-                print("已配置" if credentials_configured() else "未配置")
+                state = "已配置" if credentials_configured(profile) else "未配置"
+                print(f"{profile.display_name}：{state}")
                 return 0
             if args.credential_command == "delete":
-                phrase = input("输入 DELETE-DEMO-CREDENTIALS 确认删除: ")
-                if phrase != "DELETE-DEMO-CREDENTIALS":
+                expected = f"DELETE-{profile.name.upper()}-CREDENTIALS"
+                phrase = input(f"输入 {expected} 确认删除: ")
+                if phrase != expected:
                     print("未删除。")
                     return 2
-                delete_credentials()
+                delete_credentials(profile)
                 print("已从 Windows Credential Manager 删除。")
                 return 0
         if args.command == "supervisor":

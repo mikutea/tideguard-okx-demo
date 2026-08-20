@@ -20,7 +20,7 @@ try {
     Pop-Location
 }
 
-Write-Host '潮汐台将只监听 http://127.0.0.1:8791' -ForegroundColor Cyan
+Write-Host '墨衡将只监听 http://127.0.0.1:8791' -ForegroundColor Cyan
 Write-Host '按 Ctrl+C 停止。停止或重启后，下单授权不会保留。'
 $backend = Start-Process -FilePath $pythonPath -ArgumentList @('-m','uvicorn','okx_demo_lab.main:app','--host','127.0.0.1','--port','8791') -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
 try {

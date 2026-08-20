@@ -5,7 +5,8 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from .audit import AuditStore
-from .config import POLICY
+from .config import policy_for_profile
+from .profile import DEMO_PROFILE, EnvironmentProfile
 
 
 class SafetyError(RuntimeError):
@@ -15,8 +16,12 @@ class SafetyError(RuntimeError):
 class SafetyController:
     """Arming is deliberately memory-only; the kill latch is deliberately persistent."""
 
-    def __init__(self, store: AuditStore):
+    def __init__(
+        self, store: AuditStore, profile: EnvironmentProfile = DEMO_PROFILE
+    ):
         self.store = store
+        self.profile = profile
+        self.policy = policy_for_profile(profile)
         self._lock = threading.RLock()
         self._armed_until: datetime | None = None
         self._credential_fingerprint: str | None = None
@@ -67,6 +72,8 @@ class SafetyController:
                 remaining = 0
             return {
                 "mode": mode,
+                "operatingMode": "observe" if killed else mode,
+                "environment": self.profile.name,
                 "armedRemainingSeconds": remaining,
                 "killActive": killed,
                 "identityBound": bool(
@@ -85,15 +92,18 @@ class SafetyController:
         credential_fingerprint: str,
         account_fingerprint: str,
     ) -> dict[str, str | int | bool | None]:
-        if confirmation != "DEMO":
-            raise SafetyError("请输入 DEMO 以启用限时模拟下单。")
+        expected = "DEMO" if self.profile.name == "demo" else "我确认使用真实资金"
+        if confirmation != expected:
+            if self.profile.name == "demo":
+                raise SafetyError("请输入 DEMO 以启用限时模拟下单。")
+            raise SafetyError("请输入“我确认使用真实资金”以启用 60 秒实盘手工下单。")
         if not credential_fingerprint or not account_fingerprint:
             raise SafetyError("模拟账户身份未完成绑定。")
         with self._lock:
             if self._persistent_kill_active():
                 raise SafetyError("急停仍处于锁定状态。")
             self._armed_until = datetime.now(timezone.utc) + timedelta(
-                seconds=POLICY.arm_ttl_seconds
+                seconds=self.policy.arm_ttl_seconds
             )
             self._credential_fingerprint = credential_fingerprint
             self._account_fingerprint = account_fingerprint
@@ -102,8 +112,8 @@ class SafetyController:
         self.store.append(
             "safety.armed",
             {
-                "ttlSeconds": POLICY.arm_ttl_seconds,
-                "environment": "demo",
+                "ttlSeconds": self.policy.arm_ttl_seconds,
+                "environment": self.profile.name,
                 "identityBound": True,
             },
             actor="user",
@@ -128,6 +138,8 @@ class SafetyController:
 
         if not re.fullmatch(r"sup_[0-9a-f]{28}", decision_id):
             raise SafetyError("Codex 监督决策标识无效。")
+        if self.profile.name != "demo":
+            raise SafetyError("实盘不能复用 Demo Codex lease；需要独立实盘授权。")
         if purpose not in {"entry", "exit"}:
             raise SafetyError("监督授权用途无效。")
         if not credential_fingerprint or not account_fingerprint:
@@ -136,7 +148,7 @@ class SafetyController:
             if self._persistent_kill_active():
                 raise SafetyError("急停仍处于锁定状态。")
             self._armed_until = datetime.now(timezone.utc) + timedelta(
-                seconds=POLICY.automation_arm_ttl_seconds
+                seconds=self.policy.automation_arm_ttl_seconds
             )
             self._credential_fingerprint = credential_fingerprint
             self._account_fingerprint = account_fingerprint
@@ -147,8 +159,8 @@ class SafetyController:
             {
                 "decisionId": decision_id,
                 "purpose": purpose,
-                "ttlSeconds": POLICY.automation_arm_ttl_seconds,
-                "environment": "demo",
+                "ttlSeconds": self.policy.automation_arm_ttl_seconds,
+                "environment": self.profile.name,
                 "identityBound": True,
             },
             actor="codex-supervisor",
@@ -220,7 +232,10 @@ class SafetyController:
     def reset_kill(
         self, confirmation: str, expected_generation: int
     ) -> dict[str, str | int | bool | None]:
-        if confirmation != "解除模拟盘急停":
+        expected_phrase = (
+            "解除模拟盘急停" if self.profile.name == "demo" else "解除实盘急停"
+        )
+        if confirmation != expected_phrase:
             raise SafetyError("确认短语不匹配。")
         with self._lock:
             self._clear_arming()
@@ -228,6 +243,6 @@ class SafetyController:
             if not cleared:
                 raise SafetyError("核对期间出现了新的急停事件；急停保持锁定")
         self._append_best_effort(
-            "safety.kill_reset", {"environment": "demo"}, actor="user"
+            "safety.kill_reset", {"environment": self.profile.name}, actor="user"
         )
         return self.status()

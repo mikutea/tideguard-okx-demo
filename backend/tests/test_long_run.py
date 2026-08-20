@@ -37,6 +37,7 @@ class FakeBundle:
     model_id = MODEL_ID
     artifact_sha256 = ARTIFACT
     model = AlwaysBuyModel()
+    manifest = SimpleNamespace(market_snapshot_sha256="f" * 64)
 
 
 class FakeRegistry:
@@ -234,7 +235,7 @@ class FakeService:
         return {"safety": {"mode": "killed"}}
 
 
-def setup_coordinator(tmp_path):
+def setup_coordinator(tmp_path, *, market_data_path=None):
     audit = FakeAudit()
     autonomy = AutonomyStore(tmp_path / "autonomy.sqlite3")
     registry = FakeRegistry()
@@ -247,6 +248,8 @@ def setup_coordinator(tmp_path):
         audit=audit,  # type: ignore[arg-type]
         registry=registry,  # type: ignore[arg-type]
         autonomy=autonomy,
+        market_data_path=market_data_path,
+        market_snapshot_validator=lambda _sha: True,
         promotion_policy=PromotionPolicy(),
         policy=policy,
     )
@@ -293,6 +296,15 @@ def setup_coordinator(tmp_path):
     autonomy.record_supervisor_decision(promotion, now=NOW - timedelta(minutes=5))
     autonomy.mark_decision_applied(promotion.decision_id, now=NOW - timedelta(minutes=4))
     return coordinator, client, service, autonomy, decision
+
+
+def test_long_run_accepts_an_explicit_shared_public_market_database(tmp_path):
+    shared = tmp_path / "shared-research" / "market-data.sqlite3"
+    coordinator, _client, _service, _autonomy, _decision = setup_coordinator(
+        tmp_path,
+        market_data_path=shared,
+    )
+    assert coordinator.market_data.path == shared
 
 
 @pytest.mark.asyncio

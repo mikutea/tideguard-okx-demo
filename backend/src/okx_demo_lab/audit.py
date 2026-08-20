@@ -11,6 +11,16 @@ from typing import Any, Iterator
 
 
 SENSITIVE_FRAGMENTS = ("secret", "passphrase", "api_key", "apikey", "signature", "authorization")
+ENVIRONMENT_SWITCH_BLOCKING_INTENT_STATES = frozenset(
+    {
+        "dispatching",
+        "uncertain",
+        "manual_review",
+        "accepted",
+        "reconciled",
+        "transport_error",
+    }
+)
 
 
 class IntentIdentityConflict(RuntimeError):
@@ -525,6 +535,34 @@ class AuditStore:
                 )
                 ORDER BY created_at ASC
                 """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def revoke_uncommitted_previews_for_environment_switch(self) -> int:
+        """Invalidate requests proven not to have crossed the dispatch claim."""
+
+        with self._lock, self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                """
+                UPDATE intents SET status = 'environment_revoked'
+                WHERE status = 'previewed' AND commit_key IS NULL
+                """
+            )
+            return int(cursor.rowcount)
+
+    def environment_switch_blocking_intents(self) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in ENVIRONMENT_SWITCH_BLOCKING_INTENT_STATES)
+        with self._connection() as db:
+            rows = db.execute(
+                f"""
+                SELECT intent_id, status, cl_ord_id, credential_fingerprint,
+                       account_fingerprint, okx_ord_id
+                FROM intents
+                WHERE status IN ({placeholders})
+                ORDER BY created_at ASC
+                """,
+                tuple(sorted(ENVIRONMENT_SWITCH_BLOCKING_INTENT_STATES)),
             ).fetchall()
         return [dict(row) for row in rows]
 

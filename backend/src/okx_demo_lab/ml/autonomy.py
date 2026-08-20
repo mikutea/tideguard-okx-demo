@@ -17,7 +17,8 @@ from .strategy import canonical_json, sha256_hex
 
 
 AUTONOMY_ENABLE_CONFIRMATION = "ENABLE LONG-RUN OKX DEMO"
-AUTONOMY_SCHEMA_VERSION = "tideguard.autonomy.v1"
+LEGACY_AUTONOMY_SCHEMA_VERSION = "tideguard.autonomy.v1"
+AUTONOMY_SCHEMA_VERSION = "tideguard.autonomy.v2"
 SUPERVISOR_ACTOR = "codex-supervisor"
 ACTIVE_POSITION_STATES = frozenset(
     {"entry_submitted", "long", "exit_submitted", "manual_review"}
@@ -289,7 +290,12 @@ class AutonomyStore:
                     status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
                     model_id TEXT,
                     error_type TEXT,
-                    result_json TEXT
+                    result_json TEXT,
+                    phase TEXT NOT NULL DEFAULT 'syncing',
+                    progress_current INTEGER NOT NULL DEFAULT 0,
+                    progress_total INTEGER,
+                    snapshot_id TEXT,
+                    data_rows INTEGER
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS one_running_training
                 ON training_runs((1)) WHERE status = 'running';
@@ -391,6 +397,44 @@ class AutonomyStore:
             }
             if "position_hash" not in position_columns:
                 db.execute("ALTER TABLE positions ADD COLUMN position_hash TEXT")
+            training_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(training_runs)").fetchall()
+            }
+            for name, declaration in (
+                ("phase", "TEXT NOT NULL DEFAULT 'syncing'"),
+                ("progress_current", "INTEGER NOT NULL DEFAULT 0"),
+                ("progress_total", "INTEGER"),
+                ("snapshot_id", "TEXT"),
+                ("data_rows", "INTEGER"),
+            ):
+                if name not in training_columns:
+                    db.execute(
+                        f"ALTER TABLE training_runs ADD COLUMN {name} {declaration}"
+                    )
+            db.execute(
+                """
+                UPDATE training_runs
+                SET phase = CASE status
+                    WHEN 'completed' THEN 'completed'
+                    WHEN 'failed' THEN 'failed'
+                    ELSE phase
+                END
+                WHERE status IN ('completed', 'failed') AND phase = 'syncing'
+                """
+            )
+            state_schema = db.execute(
+                "SELECT schema_version FROM autonomy_state WHERE singleton = 1"
+            ).fetchone()
+            if state_schema is None:
+                raise AutonomyError("autonomy state is missing")
+            if state_schema["schema_version"] == LEGACY_AUTONOMY_SCHEMA_VERSION:
+                db.execute(
+                    "UPDATE autonomy_state SET schema_version = ?, updated_at = ? WHERE singleton = 1",
+                    (AUTONOMY_SCHEMA_VERSION, now),
+                )
+            elif state_schema["schema_version"] != AUTONOMY_SCHEMA_VERSION:
+                raise AutonomyError("autonomy state schema is unsupported")
 
     @staticmethod
     def _position_digest(row: sqlite3.Row) -> str:
@@ -577,12 +621,60 @@ class AutonomyStore:
             db.execute(
                 """
                 INSERT INTO training_runs
-                (run_id, started_at, completed_at, status, model_id, error_type, result_json)
-                VALUES (?, ?, NULL, 'running', NULL, NULL, NULL)
+                (run_id, started_at, completed_at, status, model_id, error_type,
+                 result_json, phase, progress_current, progress_total,
+                 snapshot_id, data_rows)
+                VALUES (?, ?, NULL, 'running', NULL, NULL, NULL,
+                        'syncing', 0, NULL, NULL, NULL)
                 """,
                 (run_id, timestamp),
             )
         return run_id
+
+    def update_training_progress(
+        self,
+        run_id: str,
+        *,
+        phase: str,
+        current: int,
+        total: int | None = None,
+        snapshot_id: str | None = None,
+        data_rows: int | None = None,
+    ) -> None:
+        allowed_phases = {
+            "syncing",
+            "snapshotting",
+            "feature_build",
+            "walk_forward",
+            "final_fit",
+            "registering",
+        }
+        if phase not in allowed_phases:
+            raise AutonomyError("training phase is invalid")
+        if isinstance(current, bool) or current < 0:
+            raise AutonomyError("training progress is invalid")
+        if total is not None and (
+            isinstance(total, bool) or total < 1 or current > total
+        ):
+            raise AutonomyError("training progress total is invalid")
+        if data_rows is not None and (
+            isinstance(data_rows, bool) or data_rows < 1
+        ):
+            raise AutonomyError("training data row count is invalid")
+        with self._lock, self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            updated = db.execute(
+                """
+                UPDATE training_runs
+                SET phase = ?, progress_current = ?, progress_total = ?,
+                    snapshot_id = COALESCE(?, snapshot_id),
+                    data_rows = COALESCE(?, data_rows)
+                WHERE run_id = ? AND status = 'running'
+                """,
+                (phase, current, total, snapshot_id, data_rows, run_id),
+            )
+            if updated.rowcount != 1:
+                raise AutonomyError("training run is not active")
 
     def finish_training(
         self,
@@ -600,10 +692,19 @@ class AutonomyStore:
             updated = db.execute(
                 """
                 UPDATE training_runs
-                SET completed_at = ?, status = ?, model_id = ?, error_type = ?, result_json = ?
+                SET completed_at = ?, status = ?, model_id = ?, error_type = ?,
+                    result_json = ?, phase = ?
                 WHERE run_id = ? AND status = 'running'
                 """,
-                (_iso(now), status, model_id, error_type, payload, run_id),
+                (
+                    _iso(now),
+                    status,
+                    model_id,
+                    error_type,
+                    payload,
+                    "completed" if status == "completed" else "failed",
+                    run_id,
+                ),
             )
             if updated.rowcount != 1:
                 raise AutonomyError("training run is not active")
@@ -622,6 +723,17 @@ class AutonomyStore:
             "status": row["status"],
             "modelId": row["model_id"],
             "errorType": row["error_type"],
+            "phase": row["phase"],
+            "progressCurrent": int(row["progress_current"]),
+            "progressTotal": (
+                int(row["progress_total"])
+                if row["progress_total"] is not None
+                else None
+            ),
+            "snapshotId": row["snapshot_id"],
+            "dataRows": (
+                int(row["data_rows"]) if row["data_rows"] is not None else None
+            ),
             "result": json.loads(row["result_json"]) if row["result_json"] else None,
         }
 
@@ -651,7 +763,8 @@ class AutonomyStore:
             updated = db.execute(
                 """
                 UPDATE training_runs
-                SET completed_at = ?, status = 'failed', error_type = 'ProcessRestart'
+                SET completed_at = ?, status = 'failed', phase = 'failed',
+                    error_type = 'ProcessRestart'
                 WHERE status = 'running'
                 """,
                 (_iso(now),),

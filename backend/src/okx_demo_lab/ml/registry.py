@@ -12,7 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .strategy import FrozenModelBundle, ModelArtifactError, canonical_json, sha256_hex
+from .strategy import (
+    MODEL_SCHEMA_VERSION,
+    FrozenModelBundle,
+    ModelArtifactError,
+    canonical_json,
+    sha256_hex,
+)
 from .walk_forward import (
     LONG_ONLY_EVALUATION_MODE,
     VALIDATION_SCHEMA_VERSION,
@@ -275,6 +281,12 @@ class ModelRegistry:
                 mismatches.append("training_config_sha256")
             if manifest.feature_schema_sha256 != report.feature_schema_sha256:
                 mismatches.append("feature_schema_sha256")
+            if manifest.benchmark_cohort_id != report.benchmark_cohort_id:
+                mismatches.append("benchmark_cohort_id")
+            if manifest.market_snapshot_sha256 != report.market_snapshot_sha256:
+                mismatches.append("market_snapshot_sha256")
+            if manifest.split_protocol_sha256 != report.split_protocol_sha256:
+                mismatches.append("split_protocol_sha256")
             if mismatches:
                 raise RegistryError("validation does not bind the candidate: " + ", ".join(mismatches))
             existing = db.execute(
@@ -347,8 +359,14 @@ class ModelRegistry:
                     "state": row["state"],
                     "trainer": row["trainer"],
                     "createdAt": row["created_at"],
+                    "benchmarkCohortId": manifest.get("benchmark_cohort_id"),
                     "trainedThrough": manifest.get("trained_through"),
+                    "trainedFrom": manifest.get("trained_from"),
                     "datasetSha256": manifest.get("dataset_sha256"),
+                    "fitDatasetSha256": manifest.get("fit_dataset_sha256"),
+                    "fitRows": manifest.get("fit_rows"),
+                    "marketSnapshotSha256": manifest.get("market_snapshot_sha256"),
+                    "splitProtocolSha256": manifest.get("split_protocol_sha256"),
                     "trainingConfigSha256": manifest.get("training_config_sha256"),
                     "featureSchemaSha256": manifest.get("feature_schema_sha256"),
                     "validationRunId": row["validation_run_id"],
@@ -480,6 +498,8 @@ class ModelRegistry:
                 bundle = self._bundle_from_row(row)
             except (ModelArtifactError, RegistryError) as exc:
                 raise PromotionDenied("candidate artifact integrity check failed") from exc
+            if bundle.schema_version != MODEL_SCHEMA_VERSION:
+                raise PromotionDenied("legacy model artifacts cannot receive a new promotion")
             validation = db.execute(
                 "SELECT * FROM validation_reports WHERE model_id = ?", (model_id,)
             ).fetchone()

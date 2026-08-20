@@ -6,8 +6,10 @@ from dataclasses import dataclass
 
 import keyring
 
+from .profile import DEMO_PROFILE, EnvironmentProfile, profile_for
 
-SERVICE_NAME = "Tideguard.OKX.Demo"
+SERVICE_NAME = DEMO_PROFILE.credential_service
+LIVE_SERVICE_NAME = "Tideguard.OKX.Live"
 KEY_NAMES = ("api_key", "api_secret", "passphrase")
 
 
@@ -22,9 +24,13 @@ class Credentials:
     passphrase: str
 
 
-def credential_fingerprint(credentials: Credentials) -> str:
+def credential_fingerprint(
+    credentials: Credentials,
+    environment: str | EnvironmentProfile = DEMO_PROFILE,
+) -> str:
     """Return a non-secret, domain-separated identifier for one API key."""
-    material = f"{SERVICE_NAME}\0{credentials.api_key}".encode("utf-8")
+    profile = profile_for(environment)
+    material = f"{profile.credential_service}\0{credentials.api_key}".encode("utf-8")
     return hashlib.sha256(material).hexdigest()
 
 
@@ -39,8 +45,12 @@ def _assert_windows_native_backend() -> None:
         )
 
 
-def set_credentials(credentials: Credentials) -> None:
+def set_credentials(
+    credentials: Credentials,
+    environment: str | EnvironmentProfile = DEMO_PROFILE,
+) -> None:
     _assert_windows_native_backend()
+    profile = profile_for(environment)
     values = {
         "api_key": credentials.api_key,
         "api_secret": credentials.api_secret,
@@ -49,12 +59,17 @@ def set_credentials(credentials: Credentials) -> None:
     if any(not value.strip() for value in values.values()):
         raise SecretStoreError("三个凭证字段都必须填写。")
     for name, value in values.items():
-        keyring.set_password(SERVICE_NAME, name, value.strip())
+        keyring.set_password(profile.credential_service, name, value.strip())
 
 
-def get_credentials() -> Credentials | None:
+def get_credentials(
+    environment: str | EnvironmentProfile = DEMO_PROFILE,
+) -> Credentials | None:
     _assert_windows_native_backend()
-    values = {name: keyring.get_password(SERVICE_NAME, name) for name in KEY_NAMES}
+    profile = profile_for(environment)
+    values = {
+        name: keyring.get_password(profile.credential_service, name) for name in KEY_NAMES
+    }
     if not any(values.values()):
         return None
     if not all(values.values()):
@@ -66,17 +81,22 @@ def get_credentials() -> Credentials | None:
     )
 
 
-def credentials_configured() -> bool:
+def credentials_configured(
+    environment: str | EnvironmentProfile = DEMO_PROFILE,
+) -> bool:
     try:
-        return get_credentials() is not None
+        return get_credentials(environment) is not None
     except SecretStoreError:
         return False
 
 
-def delete_credentials() -> None:
+def delete_credentials(
+    environment: str | EnvironmentProfile = DEMO_PROFILE,
+) -> None:
     _assert_windows_native_backend()
+    profile = profile_for(environment)
     for name in KEY_NAMES:
         try:
-            keyring.delete_password(SERVICE_NAME, name)
+            keyring.delete_password(profile.credential_service, name)
         except keyring.errors.PasswordDeleteError:
             pass

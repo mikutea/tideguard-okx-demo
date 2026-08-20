@@ -1,5 +1,7 @@
 # 视觉保真记录
 
+> 历史归档：本文对应 Tideguard v0.2–v0.3。墨衡 v0.4 的视觉真值、浏览器截图、响应式检查和修复迭代见项目根目录 `design-qa.md`。
+
 对照对象：`tideguard-concept.png`；最终实现：`tideguard-desktop.png` 与 `tideguard-mobile.png`。
 
 | 对照点 | 概念稿意图 | 最终实现证据 | 处理结果 |

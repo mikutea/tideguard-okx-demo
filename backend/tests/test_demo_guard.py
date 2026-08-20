@@ -17,7 +17,7 @@ from okx_demo_lab.secrets import Credentials, credential_fingerprint
 
 
 @pytest.mark.asyncio
-async def test_every_request_has_demo_header() -> None:
+async def test_only_private_demo_requests_have_demo_header() -> None:
     captured: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -37,7 +37,8 @@ async def test_every_request_has_demo_header() -> None:
         await client.close()
 
     assert len(captured) == 2
-    assert all(request.headers["x-simulated-trading"] == "1" for request in captured)
+    assert "x-simulated-trading" not in captured[0].headers
+    assert captured[1].headers["x-simulated-trading"] == "1"
     assert captured[1].headers["ok-access-key"] == "demo-key"
 
 
@@ -585,6 +586,31 @@ async def test_pending_orders_are_fully_paginated() -> None:
     assert len(orders) == 101
     assert cursors == [None, "101"]
     assert orders[-1]["clOrdId"] == "tg-late"
+
+
+@pytest.mark.asyncio
+async def test_account_wide_pending_orders_omit_instrument_filter() -> None:
+    observed_params: list[dict[str, str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed_params.append(dict(request.url.params))
+        data = [
+            {"ordId": "2", "instId": "ETH-USDT"},
+            {"ordId": "1", "instId": "BTC-USDT"},
+        ]
+        return httpx.Response(200, json={"code": "0", "msg": "", "data": data})
+
+    client = OkxClient(
+        credentials_provider=lambda: Credentials("a", "b", "c"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        orders = await client.get_pending_orders(None)
+    finally:
+        await client.close()
+
+    assert {order["instId"] for order in orders} == {"BTC-USDT", "ETH-USDT"}
+    assert observed_params == [{"instType": "SPOT", "limit": "100"}]
 
 
 @pytest.mark.asyncio

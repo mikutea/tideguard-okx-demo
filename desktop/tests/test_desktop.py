@@ -63,10 +63,11 @@ class DesktopContractTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows named event")
     def test_backend_stop_signal_round_trip(self) -> None:
-        signal = desktop.BackendStopSignal()
+        name = f"Local\\Tideguard.StopTest.{os.getpid()}"
+        signal = desktop.BackendStopSignal(name)
         try:
             signal.create()
-            self.assertTrue(desktop.BackendStopSignal.signal())
+            self.assertTrue(desktop.BackendStopSignal.signal(name))
             self.assertTrue(signal.wait(100))
         finally:
             signal.close()
@@ -86,6 +87,15 @@ class DesktopContractTests(unittest.TestCase):
         self.assertNotIn("secret-value", repr(result))
         self.assertNotIn("passphrase-value", repr(result))
         save.assert_called_once()
+        self.assertEqual(save.call_args.args[1], "demo")
+
+    def test_live_credentials_are_written_to_the_separate_service(self) -> None:
+        api = desktop.CredentialManagerApi()
+        with patch("okx_demo_lab.secrets.set_credentials") as save:
+            result = api.save("live-key", "live-secret", "live-passphrase", "live")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["environment"], "live")
+        self.assertEqual(save.call_args.args[1], "live")
 
     def test_credential_delete_requires_exact_confirmation(self) -> None:
         api = desktop.CredentialManagerApi()
@@ -93,6 +103,15 @@ class DesktopContractTests(unittest.TestCase):
             result = api.remove("wrong")
         self.assertFalse(result["ok"])
         delete.assert_not_called()
+
+    def test_live_credential_delete_uses_a_distinct_confirmation(self) -> None:
+        api = desktop.CredentialManagerApi()
+        with patch("okx_demo_lab.secrets.delete_credentials") as delete:
+            wrong = api.remove("DELETE-DEMO-CREDENTIALS", "live")
+            accepted = api.remove("DELETE-LIVE-CREDENTIALS", "live")
+        self.assertFalse(wrong["ok"])
+        self.assertTrue(accepted["ok"])
+        delete.assert_called_once_with("live")
 
     def test_self_test_never_configures_user_logging(self) -> None:
         with (
@@ -149,16 +168,22 @@ class DesktopContractTests(unittest.TestCase):
 
         opener = Mock()
         opener.open.return_value = Response(
-            b'{"status":"ok","app":"Tideguard","environment":"demo","version":"0.3.0"}'
+            b'{"status":"ok","app":"Tideguard","environment":"demo","version":"0.4.0"}'
         )
         with patch.object(desktop.urllib.request, "build_opener", return_value=opener):
             self.assertTrue(desktop._probe_backend())
 
         opener.open.return_value = Response(
-            b'{"status":"ok","app":"other","environment":"demo","version":"0.3.0"}'
+            b'{"status":"ok","app":"other","environment":"demo","version":"0.4.0"}'
         )
         with patch.object(desktop.urllib.request, "build_opener", return_value=opener):
             self.assertFalse(desktop._probe_backend())
+
+        opener.open.return_value = Response(
+            b'{"status":"ok","app":"Tideguard","environment":"live","version":"0.4.0"}'
+        )
+        with patch.object(desktop.urllib.request, "build_opener", return_value=opener):
+            self.assertTrue(desktop._probe_backend())
 
 
 if __name__ == "__main__":

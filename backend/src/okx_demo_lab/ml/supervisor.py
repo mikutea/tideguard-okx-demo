@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
 from typing import Any
 
 from ..audit import AuditStore
@@ -46,12 +47,14 @@ class CodexSupervisor:
         audit: AuditStore,
         promotion_policy: PromotionPolicy,
         autonomy_policy: AutonomyPolicy,
+        market_snapshot_validator: Callable[[str | None], bool] | None = None,
     ) -> None:
         self.registry = registry
         self.autonomy = autonomy
         self.audit = audit
         self.promotion_policy = promotion_policy
         self.autonomy_policy = autonomy_policy
+        self.market_snapshot_validator = market_snapshot_validator
 
     def _model_reviews(self) -> list[dict[str, Any]]:
         reviews: list[dict[str, Any]] = []
@@ -67,15 +70,25 @@ class CodexSupervisor:
             if validation:
                 report = ValidationReport.from_dict(validation["report"])
                 deterministic_failures = list(self.promotion_policy.failures(report))
+                if self.market_snapshot_validator and not self.market_snapshot_validator(
+                    report.market_snapshot_sha256
+                ):
+                    deterministic_failures.append("market_snapshot_not_current")
                 metrics = {
                     "aggregateAccuracy": report.aggregate_accuracy,
+                    "benchmarkCohortId": report.benchmark_cohort_id,
+                    "evaluationDatasetSha256": report.dataset_sha256,
                     "evaluationMode": report.evaluation_mode,
                     "folds": len(report.folds),
                     "maxDrawdown": report.max_drawdown,
+                    "marketSnapshotSha256": report.market_snapshot_sha256,
                     "netReturn": report.aggregate_net_return,
                     "oosRows": report.oos_rows,
                     "reportSha256": report.report_sha256,
                     "roundTripCostBps": report.round_trip_cost_bps,
+                    "splitProtocolSha256": report.split_protocol_sha256,
+                    "testFrom": report.folds[0].test_start_at.isoformat(),
+                    "testThrough": report.folds[-1].test_stop_at.isoformat(),
                     "trades": report.trades,
                     "worstFoldNetReturn": report.worst_fold_net_return,
                 }
@@ -84,16 +97,22 @@ class CodexSupervisor:
             reviews.append(
                 {
                     "artifactSha256": model["artifactSha256"],
+                    "comparisonBaselineCohort": None,
+                    "comparisonBaselineModelId": None,
                     "createdAt": model["createdAt"],
                     "comparisonFailures": [],
                     "deterministicFailures": deterministic_failures,
+                    "fitDatasetSha256": model.get("fitDatasetSha256"),
+                    "fitRows": model.get("fitRows"),
                     "metrics": metrics,
                     "modelId": model["modelId"],
                     "shadow": shadow,
                     "shadowFailures": list(shadow_failures),
                     "state": model["state"],
                     "trainedThrough": model["trainedThrough"],
+                    "trainedFrom": model.get("trainedFrom"),
                     "trainer": model["trainer"],
+                    "trainingConfigSha256": model.get("trainingConfigSha256"),
                     "validationRunId": model.get("validationRunId"),
                 }
             )
@@ -108,6 +127,24 @@ class CodexSupervisor:
                 None,
             )
             champion_metrics = champion_review.get("metrics") if champion_review else None
+            champion_training_config = (
+                champion_review.get("trainingConfigSha256") if champion_review else None
+            )
+            comparison_fields = (
+                "benchmarkCohortId",
+                "evaluationDatasetSha256",
+                "marketSnapshotSha256",
+                "splitProtocolSha256",
+                "testFrom",
+                "testThrough",
+            )
+
+            def same_cohort(left: dict[str, Any], right: dict[str, Any]) -> bool:
+                return all(
+                    left.get(field) and left.get(field) == right.get(field)
+                    for field in comparison_fields
+                )
+
             for item in reviews:
                 if item["modelId"] == champion["modelId"] or item["state"] != "validated":
                     continue
@@ -116,16 +153,43 @@ class CodexSupervisor:
                 if not candidate_metrics or not champion_metrics:
                     failures.append("champion_comparison_missing")
                 else:
-                    required_net = float(champion_metrics["netReturn"]) + float(
-                        self.autonomy_policy.min_challenger_oos_improvement
+                    baseline = (
+                        champion_review
+                        if same_cohort(candidate_metrics, champion_metrics)
+                        else next(
+                            (
+                                review
+                                for review in reviews
+                                if champion_training_config
+                                and review.get("trainingConfigSha256")
+                                == champion_training_config
+                                and review.get("metrics")
+                                and same_cohort(
+                                    candidate_metrics,
+                                    review["metrics"],
+                                )
+                            ),
+                            None,
+                        )
                     )
-                    if float(candidate_metrics["netReturn"]) < required_net:
-                        failures.append("challenger_oos_improvement_insufficient")
-                    maximum_drawdown = float(champion_metrics["maxDrawdown"]) + float(
-                        self.autonomy_policy.max_challenger_drawdown_regression
-                    )
-                    if float(candidate_metrics["maxDrawdown"]) > maximum_drawdown:
-                        failures.append("challenger_drawdown_regression")
+                    baseline_metrics = baseline.get("metrics") if baseline else None
+                    if not baseline_metrics:
+                        failures.append("champion_comparison_missing")
+                    else:
+                        item["comparisonBaselineModelId"] = baseline["modelId"]
+                        item["comparisonBaselineCohort"] = baseline_metrics.get(
+                            "benchmarkCohortId"
+                        )
+                        required_net = float(baseline_metrics["netReturn"]) + float(
+                            self.autonomy_policy.min_challenger_oos_improvement
+                        )
+                        if float(candidate_metrics["netReturn"]) < required_net:
+                            failures.append("challenger_oos_improvement_insufficient")
+                        maximum_drawdown = float(baseline_metrics["maxDrawdown"]) + float(
+                            self.autonomy_policy.max_challenger_drawdown_regression
+                        )
+                        if float(candidate_metrics["maxDrawdown"]) > maximum_drawdown:
+                            failures.append("challenger_drawdown_regression")
                 item["comparisonFailures"] = failures
         return reviews
 

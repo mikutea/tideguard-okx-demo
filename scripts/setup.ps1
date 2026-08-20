@@ -26,4 +26,6 @@ try {
 
 Write-Host ''
 Write-Host '安装完成。下一步请在本机终端设置 OKX 模拟盘凭证：' -ForegroundColor Green
-Write-Host '.\.venv\Scripts\python.exe -m okx_demo_lab.cli credentials set'
+Write-Host '.\.venv\Scripts\python.exe -m okx_demo_lab.cli credentials set --environment demo'
+Write-Host 'Live 凭证必须单独设置，且不会复用 Demo：'
+Write-Host '.\.venv\Scripts\python.exe -m okx_demo_lab.cli credentials set --environment live'

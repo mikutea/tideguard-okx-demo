@@ -1,50 +1,48 @@
-# Tideguard v0.3 长期自动量化契约
+# 墨衡 v0.4 长期自动量化契约
 
-本文件冻结 v0.3 的实现边界。目标是长期运行的 **OKX Demo-only、BTC-USDT、cash SPOT** 自动量化系统；它优化可验证的风险调整后结果，但不承诺未来收益。
+目标是长期运行、可证据化升级的 **OKX Demo、BTC-USDT、cash SPOT** 自动量化系统；优化的是扣成本、受限风险下的前瞻证据，不承诺未来收益。OKX Live 在同一应用中有独立连接和人工限时交易能力，但 v0.4 不允许 AI/Codex 自动下 Live 订单。
 
-## 三个隔离平面
+## 四个隔离平面
 
 ```text
-公共行情/训练平面
-  -> candidate + 内容哈希 + walk-forward/压力报告
-  -> Codex Supervisor 脱敏审查决策
-  -> champion registry（可回滚）
-  -> 确定性执行平面
-  -> OKX Demo
+公共数据仓库
+  -> candidate + snapshot/split/config hashes
+  -> Codex Supervisor 脱敏审查
+  -> champion registry / rollback
+  -> deterministic execution service
+  -> OKX Demo or guarded manual OKX Live
 ```
 
-1. **研究平面**只能访问公共行情。它按计划训练新 candidate、生成固定数据快照哈希、执行无前视的 walk-forward、24 bps 成本压力诊断和 shadow 记录。训练失败绝不能影响当前 champion。
-2. **监督平面**只读取脱敏模型元数据、验证报告、shadow/live 统计、代码版本和风控哈希。Codex 可以批准或拒绝 candidate、续发执行 lease、暂停系统和回滚 champion；它不能读取原始 API Secret，不能改交易环境、品种、资金上限或 kill switch。
-3. **执行平面**只接受已冻结 champion、有效 supervisor lease 和用户预先启用的 Demo master switch。最终订单仍必须经过 TradingService 的身份绑定、预检、幂等提交、CAA 和急停门。
+1. **数据/研究平面**只访问 OKX 公共行情，构建不可变 snapshot、滚动 walk-forward 和未来 Shadow；不读取任何账户凭证。
+2. **监督平面**只读取模型/报告/策略哈希和脱敏指标。Codex 可审查、晋级、拒绝、暂停或回滚 Demo champion，但不能选择环境、解除急停或扩大风险。
+3. **执行平面**只接受冻结 champion、有效 Demo lease、用户 Demo master 和确定性风控；模型只能产生意图。
+4. **环境治理平面**管理 Demo/Live 独立凭证、账户指纹、状态目录、请求头和切换 challenge；它拥有比模型更高的否决权。
 
 ## 自我更迭不是在线自改
 
-允许的模型更迭流程：
-
 ```text
-scheduled train
-  -> validated candidate
-  -> shadow observations
-  -> deterministic gates
+scheduled history sync
+  -> immutable snapshot
+  -> three validated candidates
+  -> prospective shadow
+  -> paired champion-recipe comparison
   -> Codex decision
-  -> flat-position promotion
-  -> canary Demo allocation
-  -> monitor / rollback or retain
+  -> flat-position generation CAS
+  -> Demo canary
+  -> retain / suspend / rollback
 ```
 
-禁止模型在运行时修改源代码、特征定义、标签、风控阈值、交易品种、账户权限或资金规模。新模型只以不可执行的规范 JSON artifact 出现；晋级采用 generation CAS，并保留上一 champion 用于回滚。
+禁止模型在运行时修改源码、特征、标签、验证门、风险阈值、品种、账户权限、交易环境或资金规模。新模型只以不可执行严格 JSON artifact 出现；训练故障保留旧 champion，不会覆盖。
 
-## Demo master switch 与监督 lease
+## Demo master 与 Codex lease
 
-- 新安装默认 `disabled`。用户显式启用后，该选择与账户指纹会跨 UI/daemon 重启持久保存，直至用户关闭；每笔订单仍需重新获得短时 supervisor arm。
-- 用户在开始模拟盘测试时只需一次显式启用；此动作绑定当时的 API Key 指纹和 OKX UID 指纹，但不保存秘密。
-- Codex Supervisor lease 最长 24 小时。后台每次准备新开仓前都重新检查 lease、champion、账户身份、审计链和硬风控。
-- lease 过期、Codex 拒绝、模型过期、数据漂移、审计异常或账户身份变化时，系统停止新开仓。
-- 已确认属于 Tideguard 的持仓仍允许执行风险降低型退出；退出不能卖出账户原有 BTC。
+- 新安装默认 `disabled`。用户显式启用 Demo master 后，状态绑定 Demo API Key 指纹和 OKX uid/mainUid 指纹。
+- Codex lease 最长 24 小时；每笔 entry/exit 仍产生新的短时 supervisor arm，并绑定 decision ID 和用途。
+- lease 过期、模型/策略/账户身份变化、数据或审计异常、Shadow/Demo 风险门失败时，停止新开仓。
+- 关闭 master 立即禁止新 entry；已确认属于模型的库存仍保留风险降低型 exit 管理。
+- Live profile 的 supervisor CLI、arm_supervised 和 long-run enable 均硬拒绝，不能复用 Demo 决策。
 
-## 订单与持仓状态机
-
-每个持仓都绑定 entry model、policy、账户身份和实际累计成交量：
+## 订单与模型库存
 
 ```text
 flat
@@ -52,35 +50,57 @@ flat
   -> entry_unfilled | long | manual_review
 long
   -> exit_submitted
-  -> long (partial exit) | closed | manual_review
+  -> long(partial) | closed | manual_review
 ```
 
-- 自动订单使用 `IOC limit`，剩余未成交部分由交易所立即取消；系统仍逐笔 GET order 确认终态，不能把提交响应当成交。
-- `accFillSz` 是唯一持仓数量来源。零成交不创建持仓；部分成交只记录实际成交量。
-- SELL 数量不得超过该 position 的 `remaining_size`，并在交易前再次核对同一账户可用 BTC。
-- 默认按 12 根已完成 5 分钟 K 线退出；同时有固定止损、止盈和最大持仓时间。历史 OOS 与未来 shadow 使用相同 bracket，并在提前退出后保留原 12 根资本冷却窗。模型更换不能改写已有持仓的退出计划。
-- 不确定下单、无法查询终态、数量不一致或持久化失败都会触发 kill + `manual_review`，禁止自动重试未知提交。
+- 自动订单为限价 IOC；提交响应不是成交证明，系统逐笔 GET order。
+- `accFillSz` 是库存数量来源。BTC 手续费减少模型净库存；USDT 费用进入净结果。
+- SELL 先按 lot size 向下对齐，且不能超过该 position 的 remaining size；账户原有 BTC 不属于模型。
+- 持仓默认 12 根 5m，另有固定止损、止盈和最大持有时间；模型换代不改写已有 position 的退出计划。
+- 小于最小卖出量的残余保留数量、急停并人工核对，不记作已平仓。
+- 模糊下单、无法核对终态、身份错配或持久化异常均 kill + manual review；未知提交绝不自动重试。
+
+## 环境切换线性化
+
+最终确认阶段在首个异步网络复核前，先设置进程单调的 `transitionPending` dispatch gate，并立即 signal/persist 当前 kill。该 gate 会被：
+
+- `arm`
+- `preview`
+- `commit`
+- 最终 `_dispatch_guard`
+
+共同检查。已经进入真实 HTTP 的不可逆请求会先完成；切换流程等待 trade lock，再重新检查本地意图、模型持仓和当前/目标账户的全部 SPOT pending orders（不限定交易对）。只有零 blocker、零 pending、两侧 kill 已持久化时才写 selector。最终核对失败时 gate 和 kill 保留到重启，不能自动重新开放交易。
+
+## Live 人工交易
+
+- Live 使用独立 Key、状态 DB、tag 和风险策略；私有请求明确不发送模拟头。
+- API Key 必须 Read+Trade、禁 Withdraw、绑定 IP，账户为 Spot mode。
+- 每次启动 Live 都先持久急停；解除急停需逐字输入 `解除实盘急停` 并完成订单终态核对。
+- 人工 arm 需输入 `我确认使用真实资金`，只生效 60 秒；单笔最多 10 USDT、最多一个挂单、且不超过权益 0.05%。
+- arm 初始化必须确认 CAA；凭证轮换、审计异常、deadman 失效或请求歧义均停止执行。
 
 ## 暂停与回滚
 
-以下任一条件停止新开仓并保持退出管理：
+以下任一条件停止新开仓：
 
-- rolling Demo 回撤超过硬上限；
-- 订单身份不一致、未知提交或持久状态异常；
-- shadow 表现不再满足下一次 lease 的门槛；
-- 训练/验证数据不连续、时间戳异常、审计链损坏；
-- Codex lease 过期或明确拒绝。
+- rolling Demo 回撤越过硬上限；
+- 订单未知、模型库存异常或账户身份变化；
+- snapshot 缺口/冲突、报告口径不匹配、审计链损坏；
+- Shadow 或 paired comparison 不满足门；
+- Codex lease 过期/拒绝；
+- 环境切换开始或 selector 状态无效。
 
-只有在空仓、没有未决订单且候选通过全部确定性门槛时，Codex 才能晋级或回滚。回滚由周期 Codex 监督任务基于脱敏证据决定，不由模型自行触发；它只改变未来入场模型，不会改变已有持仓。
+只有空仓、没有未决订单且候选通过全部确定性与前瞻门时，Codex 才能晋级或回滚。它只改变未来 entry 模型，不改变已有持仓。
 
-## 长期进程
+## 长期 Windows 进程
 
-Windows 包包含一个单实例 `--daemon` 模式：固定独占 `127.0.0.1:8791`，运行训练调度、持仓恢复、CAA 和 API。UI 可连接已有 daemon；关闭 UI 不终止 daemon。安装器默认创建当前用户登录自启动任务，但不替用户开启 Demo master switch。Codex 决策由独立的本机周期监督任务写入内容寻址决策表。
+单实例 `--daemon` 固定独占 `127.0.0.1:8791`，运行训练调度、持仓恢复、CAA 和本地 API。UI 可连接 daemon；关闭 UI 不终止后台。安装器始终提供“启动/停止墨衡后台服务”入口，并提供默认不勾选的当前用户登录自启动选项（受 Windows 安全策略约束）；它不会替用户启用 Demo master、解除 kill、切换 Live 或配置凭证。
 
-## 上线顺序
+## 推荐上线顺序
 
-1. 离线故障注入和历史回放。
-2. 公共数据 shadow，零私有请求。
-3. 配置 Demo 凭证并人工启动首个测试窗口。
-4. 至少一个完整评估周期后才允许 Codex 续发长期 lease。
-5. 本版本不包含正式盘路径。
+1. 离线故障注入、历史回放和构建自检。
+2. 全历史 OOS 与公共 Shadow，零私有请求。
+3. Demo 账户只读核验。
+4. 用户启用 Demo master，10 USDT canary 与闭环退出。
+5. 积累至少一个完整前瞻评估窗口，持续由 Codex 审查、暂停或回滚。
+6. Live 只做用户显式的人工限时交易；未来若开放自动化，必须另建实盘资金预算、canary、授权和审计协议。
