@@ -3,7 +3,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from fastapi import HTTPException
 
 from okx_demo_lab import main as main_module
 from okx_demo_lab.profile import LIVE_PROFILE
@@ -36,6 +38,12 @@ class ConnectionClient:
     ) -> list[dict[str, str]]:
         assert expected_credential_fingerprint == "e" * 64
         return [self.config]
+
+
+class FailingConnectionClient(ConnectionClient):
+    async def public_get(self, path: str) -> list[dict[str, str]]:
+        request = httpx.Request("GET", f"https://openapi.okx.com{path}")
+        raise httpx.ConnectError("diagnostic transport failure", request=request)
 
 
 def request_for(config: dict[str, str]) -> tuple[Any, RecordingStore]:
@@ -103,3 +111,27 @@ async def test_live_connection_reports_valid_policy(
     assert result["privateReachable"] is True
     assert result["policyValid"] is True
     assert result["policyReason"] is None
+
+
+@pytest.mark.asyncio
+async def test_connection_transport_failure_is_sanitized_as_bad_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, _ = request_for(
+        {
+            "uid": "10002",
+            "mainUid": "10002",
+            "perm": "read_only,trade",
+            "ip": "203.0.113.4",
+            "acctLv": "1",
+        }
+    )
+    request.app.state.client = FailingConnectionClient({})
+    monkeypatch.setattr(main_module, "credentials_configured", lambda *args: True)
+
+    with pytest.raises(HTTPException) as caught:
+        await main_module.connection_test(request)
+
+    assert caught.value.status_code == 502
+    assert caught.value.detail == "OKX 网络连接失败，请检查本机网络后重试"
+    assert "diagnostic" not in caught.value.detail

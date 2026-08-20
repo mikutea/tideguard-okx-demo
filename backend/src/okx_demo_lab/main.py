@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets as token_secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -176,12 +178,15 @@ def recover_autonomy_position_before_loop(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    startup_logger = logging.getLogger("tideguard.startup")
+    startup_logger.info("Startup stage: resolve_environment")
     data_root = app_data_dir()
     runtime_environment = RuntimeEnvironment(
         EnvironmentSelectionStore(data_root / ENVIRONMENT_SELECTOR_FILE)
     )
     profile = runtime_environment.active_profile
     data_dir = profile.runtime_data_dir(data_root)
+    startup_logger.info("Startup stage: audit_store")
     store = AuditStore(data_dir / "state.sqlite3")
     if not store.verify_chain():
         store.engage_kill_latch()
@@ -217,7 +222,9 @@ async def lifespan(app: FastAPI):
     app.state.service = service
     app.state.environment_runtime = runtime_environment
     app.state.data_root = data_root
+    startup_logger.info("Startup stage: ml_registry")
     ml = MLCoordinator(data_dir=data_dir, client=client, service=service, store=store)
+    startup_logger.info("Startup stage: autonomy_store")
     autonomy = AutonomyStore(data_dir / "autonomy.sqlite3")
     recovered_training_runs = autonomy.recover_running_training(
         now=datetime.now(timezone.utc)
@@ -228,6 +235,7 @@ async def lifespan(app: FastAPI):
             {"count": recovered_training_runs},
             actor="system",
         )
+    startup_logger.info("Startup stage: market_data_store")
     long_run = LongRunCoordinator(
         client=client,
         service=service,
@@ -236,6 +244,7 @@ async def lifespan(app: FastAPI):
         autonomy=autonomy,
         market_data_path=data_root / "market-data.sqlite3",
     )
+    startup_logger.info("Startup stage: recovery")
     try:
         autonomy_recovery_reason = recover_autonomy_position_before_loop(
             autonomy, store, long_run
@@ -302,6 +311,7 @@ async def lifespan(app: FastAPI):
 
     app.state.deadman_task = asyncio.create_task(deadman_loop())
     app.state.ml_task = asyncio.create_task(long_run.run())
+    startup_logger.info("Startup stage: ready")
     try:
         yield
     finally:
@@ -441,6 +451,11 @@ async def connection_test(request: Request) -> dict[str, Any]:
         }
     except OkxClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="OKX 网络连接失败，请检查本机网络后重试",
+        ) from exc
 
 
 @app.get("/api/v1/environment/status")
