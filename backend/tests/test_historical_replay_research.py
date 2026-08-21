@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import json
+from threading import Barrier
+
 import numpy as np
 import pytest
 
@@ -39,7 +43,7 @@ def test_replay_protocol_is_rolling_365_day_training_and_30_day_retraining() -> 
     assert spec.train_size == 365 * 288
     assert spec.test_size == 30 * 288
     assert spec.step_size == 30 * 288
-    assert spec.label_horizon == 13
+    assert spec.label_horizon == 12
     assert spec.embargo_size == 1
     assert spec.expanding is False
 
@@ -54,6 +58,7 @@ def test_policy_replay_is_always_research_only_and_shadow_days_stay_zero() -> No
         expected,
         np.zeros(timestamps.size, dtype=np.int32),
         (ReplayEpisodeBinding("replay_episode_test", int(timestamps[0])),),
+        np.ascontiguousarray(candles[:, :, 6]),
     )
 
     assert result["decision"] == "research_only"
@@ -64,12 +69,19 @@ def test_policy_replay_is_always_research_only_and_shadow_days_stay_zero() -> No
     assert result["chosenPolicy"]["edgeBufferBps"] == 72.0
     assert result["chosenPolicy"]["minEntrySpacingBars"] == 12
     assert result["historicalSelectionBias"]["resultMayBeOptimistic"] is True
-    assert result["ordinary"]["leakageGuard"]["sameBarFillAllowed"] is False
+    assert result["ordinary"]["leakageGuard"]["decisionToFillBars"] == 0
+    assert result["ordinary"]["leakageGuard"]["sameDecisionRowFill"] is True
+    assert result["ordinary"]["leakageGuard"]["checkpointValuationBasis"] == (
+        "current_bar_open_at_checkpoint_boundary"
+    )
     assert result["stress48Bps"]["broker"]["roundTripCostBps"] == 48.0
+    assert len(result["stress48Bps"]["checkpoints"]) >= 2
     assert result["ordinary"]["broker"]["capacityHandling"] == "clip"
     assert result["executionSlice"]["instrument"] == "BTC-USDT"
     assert result["executionSlice"]["decision"] == "research_only"
     assert result["executionSlice"]["ordinary"]["trades"] >= 1
+    assert len(result["executionSlice"]["ordinary"]["checkpoints"]) >= 2
+    assert len(result["executionSlice"]["stress48Bps"]["checkpoints"]) >= 2
 
 
 def test_execution_targets_match_next_open_and_fixed_horizon_exit() -> None:
@@ -84,7 +96,7 @@ def test_execution_targets_match_next_open_and_fixed_horizon_exit() -> None:
         time_rows=20,
     )
 
-    expected = candles[15:35, :, 0] / candles[3:23, :, 0] - 1.0
+    expected = candles[14:34, :, 0] / candles[2:22, :, 0] - 1.0
     assert np.allclose(returns, expected)
     assert np.array_equal(
         labels,
@@ -114,3 +126,27 @@ def test_replay_evidence_cannot_be_overwritten(tmp_path) -> None:
         _write_report(output, {"reportSha256": "a" * 64})
 
     assert output.read_text(encoding="utf-8") == "existing evidence\n"
+
+
+def test_replay_evidence_concurrent_writers_cannot_clobber(tmp_path) -> None:
+    output = tmp_path / "replay.json"
+    barrier = Barrier(2)
+
+    def write(value: str) -> str:
+        barrier.wait()
+        try:
+            _write_report(output, {"reportSha256": value * 64})
+        except ReplayResearchError:
+            return "rejected"
+        return value
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(write, ("a", "b")))
+
+    assert results.count("rejected") == 1
+    winner = next(value for value in results if value != "rejected")
+    assert json.loads(output.read_text(encoding="utf-8")) == {
+        "reportSha256": winner * 64
+    }
+    assert not output.with_name(output.name + ".lock").exists()
+    assert list(tmp_path.glob("*.tmp")) == []

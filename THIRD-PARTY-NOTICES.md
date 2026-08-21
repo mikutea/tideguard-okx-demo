@@ -31,3 +31,10 @@ terms and notices.
 The installer may carry the Microsoft-signed Evergreen WebView2 bootstrapper.
 Microsoft Edge WebView2 is licensed by Microsoft under its own redistributable
 terms and is not covered by this project's MIT License.
+
+Optional research-only component (not bundled into the desktop executable or
+installer): NautilusTrader `2.0.0rc3`, LGPL-3.0-only,
+https://github.com/nautechsystems/nautilus_trader. Its Windows wheel is fetched
+only by the explicit research setup script, verified against the lockfile
+SHA-256, and installed below `.research-data/nautilus-poc/`. Redistribution or
+future bundling requires a separate license and notice review.

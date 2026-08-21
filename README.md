@@ -13,7 +13,7 @@ v0.4 默认使用 **OKX 模拟盘**。它同时提供隔离的 OKX Live 连接�
 - OKX 官方公共 `BTC-USDT / SPOT / 5m` 历史可恢复回填；当前接口实测可追溯到 2018-01-11，具体起点每次仍以官方空页为准。
 - 独立 `market-data.sqlite3`：确认线、严格时间网格、内容冲突隔离、缺口门、流式快照 SHA-256 和断点续传。
 - NumPy 向量化的冻结线性逻辑候选；三组预声明配置共享同一特征矩阵和相同 OOS cohort。
-- v5 rolling walk-forward：365 天训练、末 30 天隔离校准、13 bars purge、每 30 天重训/回放、long/flat、非重叠资本和 24/48 bps 成本；单独报告多币研究组合与 BTC 执行切片。
+- V6 historical replay：365 天训练、末 30 天隔离校准、12-bar label horizon + 1-bar embargo（共 13 bars gap）、每 30 天重训/回放、long/flat、非重叠资本和 24/48 bps 成本；确认线收盘与下一根开盘共用同一时间边界，执行时钟使用 `latency=0`。V5 因额外等待一根 K 线而退役。
 - challenger 优先与同 cohort champion 比较；跨 cohort 时使用新快照内同 `trainingConfigSha256` 的 champion 配方基线，缺失即失败关闭。
 - 新候选必须经过确定性门、与下一根开盘成交一致的 Future Shadow、Codex 脱敏证据审查和 generation CAS；协议或策略哈希不一致的旧 Shadow 不计入晋级，训练失败不会替换当前 champion。
 - Demo 自动订单使用限价 IOC，按真实累计成交和费用记录模型自有库存；未知提交绝不盲重试。
@@ -37,7 +37,7 @@ Live 切换不是普通开关。服务端会关闭自动化、核对两侧审计
 
 ## Windows 桌面版
 
-从 [GitHub Releases](https://github.com/mikutea/tideguard-okx-demo/releases/latest) 下载 `Moheng-Setup-*.exe`。安装器使用原 Tideguard AppId、数据目录、mutex 和内部 EXE 名称保持升级兼容；用户可见名称、图标、快捷方式和 Release 产物已切换为墨衡。
+墨衡 v0.4 安装器尚未发布；当前 [GitHub Releases](https://github.com/mikutea/tideguard-okx-demo/releases/latest) 的最新版仍是旧品牌 Tideguard v0.3.0，请不要把它误认为本分支构建。v0.4 合并并完成发布检查后，Release 才会提供 `Moheng-Setup-*.exe`。安装器继续沿用原 Tideguard AppId、数据目录、mutex 和内部 EXE 名称以保持升级兼容，而用户可见名称、图标、快捷方式和新 Release 产物使用墨衡。
 
 开始菜单包含：
 
@@ -92,7 +92,7 @@ Codex Supervisor 只读取脱敏的模型/数据/策略哈希和验证指标：
 .\.venv\Scripts\python.exe -m okx_demo_lab.cli supervisor review
 ```
 
-完整说明见 [模型架构](docs/ML-ARCHITECTURE.md)、[长期自动量化架构](docs/AUTONOMY-ARCHITECTURE.md) 和 [历史数据仓库](docs/HISTORY-DATA.md)。历史高速回放可用 `scripts/run-historical-replay.ps1` 在冻结多资产 cohort 上按 30 天周期重训并回放。V5 将标签对齐到下一根开盘成交与 12 根后退出，并单独结算 BTC-USDT 执行白名单；最新结果和上线缺口见 [V5 BTC 执行就绪度诊断](docs/reports/v5-execution-readiness/report.md)。它固定为研究证据，不能累计 Shadow 天数或触发订单。
+完整说明见 [模型架构](docs/ML-ARCHITECTURE.md)、[长期自动量化架构](docs/AUTONOMY-ARCHITECTURE.md) 和 [历史数据仓库](docs/HISTORY-DATA.md)。历史高速回放可用 `scripts/run-historical-replay.ps1` 在冻结多资产 cohort 上按 30 天周期重训并回放。V6 的正确口径是：确认线收盘时间戳就是下一根 K 线开盘时间戳，在该边界以 `latency=0` 入场，12 根后开盘退出；12-bar label horizon 加 1-bar embargo 形成 13 bars gap。最终合同还强制 open-boundary 检查点估值标记、四账本峰谷见证及现金/持仓市值对账。[V6 修正语义报告](docs/reports/v6-execution-semantics/report.md) 已经两次确定性复跑，并通过 standalone 结构/逐笔账本完整性验证；该验证不会从冻结源数据重新训练或重放，因此明确为 `sourceReplayVerified=false`。多资产历史开发结果为正，但 BTC 切片仅 14 笔，仍未过样本门。V5 曾在这个已对齐的边界上再次施加一根延迟，现已退役；[V5 历史诊断](docs/reports/v5-execution-readiness/report.md) 仅保留旧值。V6 与 V5 都不能累计 Shadow 天数或触发订单，当前执行白名单仍仅为 `BTC-USDT`。
 
 ## 第三方模型研究层
 
@@ -110,6 +110,11 @@ XGBoost、CatBoost 和 MLP，并统一执行 30 折 rolling OOS、最后四折�
 shadow 或订单链。精确协议、指标与 canonical 报告哈希见
 [第三方模型基准](docs/THIRD-PARTY-BENCHMARK.md)，源码与许可边界见
 [研究准入清单](research/THIRD-PARTY.md)。
+
+NautilusTrader 仅以锁定版本和 wheel 哈希的 Python 3.12 隔离 sidecar PoC 接入；
+每次运行还会逐文件核对 setup 状态、安装 `RECORD` 和 wheel 内容；
+它不进入桌面 EXE、凭证进程或订单链，也不会改变 `BTC-USDT` 执行白名单。采用
+边界见 [NautilusTrader 采用决策](docs/NAUTILUS-ADOPTION.md)。
 
 多资产和新闻/社媒扩展遵循独立研究边界：公共 universe 发现不会扩大订单
 白名单；弱信号必须保留首次可见时间和许可快照，先做消融与前瞻 Shadow。

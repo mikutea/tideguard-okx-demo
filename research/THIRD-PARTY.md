@@ -16,7 +16,7 @@ or pretrained file is never profitability evidence.
 | skfolio / PyPortfolioOpt | Portfolio parity challengers | Research-only covariance, HRP and allocation comparison | BSD-3-Clause / MIT; review before pinning |
 | Qlib | Research-workflow reference | Separate process/reference only; no copied model weights | MIT; defer framework embedding |
 | FreqAI | Retraining/producer-consumer reference | Separate GPL process, Demo shadow signals only | GPL-3.0; do not link or bundle into MOHENG |
-| NautilusTrader | Event-driven simulation reference | Separate sidecar only; not an order path | LGPL-3.0; defer heavy integration |
+| NautilusTrader | Pinned event-simulation sidecar PoC | Separate Python 3.12 public-research process; no credentials, private API, orders, EXE bundling or allowlist changes | LGPL-3.0-only; `2.0.0rc3` wheel hash locked, research PoC only |
 | vectorbt | Internal analyst experimentation only | Never bundled or redistributed with MOHENG | Apache-2.0 plus Commons Clause; excluded from product |
 
 Source repositories: [awesome-systematic-trading](https://github.com/paperswithbacktest/awesome-systematic-trading),
@@ -34,6 +34,14 @@ Source repositories: [awesome-systematic-trading](https://github.com/paperswithb
 [NautilusTrader](https://github.com/nautechsystems/nautilus_trader), and
 [vectorbt](https://github.com/polakowo/vectorbt). Exact installed versions are
 recorded in the hash-locked requirements file and every benchmark report.
+
+The NautilusTrader PoC is pinned by `research/nautilus-lock.json` to the official
+CPython 3.12 Windows x86-64 wheel for `2.0.0rc3`, including its exact SHA-256.
+It is installed only below `.research-data/nautilus-poc/` and communicates via a
+versioned canonical JSON protocol. This validates an isolated integration
+boundary, not strategy profitability or V6 execution parity. It remains
+`research_only / promotable=false`, and the execution allowlist remains
+`BTC-USDT`.
 
 Cryptofeed 2.4.1 is accepted only for public trades. Its OKX L2 adapter does not
 validate the post-2026 `seqId/prevSeqId` continuity protocol, so it is rejected

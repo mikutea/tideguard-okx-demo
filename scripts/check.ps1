@@ -17,13 +17,33 @@ New-Item -ItemType Directory -Path $pytestTemp -Force | Out-Null
 try {
     & $pythonPath -m pytest (Join-Path $projectRoot 'backend\tests') --basetemp $pytestTemp -q
     Assert-NativeSuccess '后端测试'
+    & $pythonPath -m pytest (Join-Path $projectRoot 'research\tests') --basetemp $pytestTemp -q
+    Assert-NativeSuccess '隔离研究协议测试'
 } finally {
     if (Test-Path -LiteralPath $pytestTemp) {
         Remove-Item -LiteralPath $pytestTemp -Recurse -Force
     }
 }
-& $pythonPath -m compileall -q (Join-Path $projectRoot 'backend\src') (Join-Path $projectRoot 'desktop')
+& $pythonPath -m compileall -q (Join-Path $projectRoot 'backend\src') (Join-Path $projectRoot 'desktop') (Join-Path $projectRoot 'research')
 Assert-NativeSuccess 'Python 编译检查'
+
+foreach ($scriptName in @(
+    'setup-nautilus-poc.ps1',
+    'run-nautilus-poc.ps1',
+    'run-historical-replay.ps1'
+)) {
+    $tokens = $null
+    $parseErrors = $null
+    $scriptPath = Join-Path $projectRoot "scripts\$scriptName"
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        $scriptPath,
+        [ref]$tokens,
+        [ref]$parseErrors
+    ) | Out-Null
+    if ($parseErrors.Count -ne 0) {
+        throw "PowerShell 脚本语法检查失败：$scriptName"
+    }
+}
 & $pythonPath -m unittest discover -s (Join-Path $projectRoot 'desktop\tests') -v
 Assert-NativeSuccess '桌面宿主测试'
 & $pythonPath -m unittest discover -s (Join-Path $projectRoot 'packaging\tests') -v
@@ -41,7 +61,7 @@ try {
     Pop-Location
 }
 
-$secretPattern = '(?i)(?:[\x22\x27]?(?:OKX_API_KEY|OKX_API_SECRET|OKX_PASSPHRASE)[\x22\x27]?|(?:api[_-]?(?:key|secret)|passphrase))\s*[:=]\s*[\x22\x27][^\x22\x27]{8,}[\x22\x27]'
+$secretPattern = '(?i)(?:[\x22\x27]?(?:OKX_API_KEY|OKX_API_SECRET|OKX_API_PASSPHRASE|OKX_SECRET_KEY|OKX_PASSPHRASE)[\x22\x27]?|(?:api[_-]?(?:key|secret)|passphrase))\s*[:=]\s*[\x22\x27][^\x22\x27]{8,}[\x22\x27]'
 $privateKeyPattern = '-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'
 $ripgrep = Get-Command rg -ErrorAction SilentlyContinue
 if ($ripgrep) {

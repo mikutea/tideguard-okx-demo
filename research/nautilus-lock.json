@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "component": "nautilus-trader-offline-poc",
+  "package": {
+    "distribution": "nautilus-trader",
+    "version": "2.0.0rc3",
+    "license": "LGPL-3.0-only",
+    "repository": "https://github.com/nautechsystems/nautilus_trader",
+    "release": "https://github.com/nautechsystems/nautilus_trader/releases/tag/v2.0.0rc3"
+  },
+  "artifact": {
+    "filename": "nautilus_trader-2.0.0rc3-cp312-cp312-win_amd64.whl",
+    "url": "https://github.com/nautechsystems/nautilus_trader/releases/download/v2.0.0rc3/nautilus_trader-2.0.0rc3-cp312-cp312-win_amd64.whl",
+    "sha256": "8a90b01ccf66d78946c565bca08b7758bc7f312caf1ded1c2c2c710013a7c092",
+    "size_bytes": 61222443,
+    "python_tag": "cp312",
+    "abi_tag": "cp312",
+    "platform_tag": "win_amd64"
+  },
+  "runtime": {
+    "python_request": "cpython-3.12.13-windows-x86_64",
+    "python_version": "3.12.13",
+    "python_implementation": "CPython",
+    "architecture": "x86_64",
+    "pointer_bits": 64,
+    "project_relative_root": ".research-data/nautilus-poc"
+  },
+  "policy": {
+    "purpose": "offline-research-only",
+    "setup_network_scope": "uv-managed-exact-python-version-and-pinned-nautilus-wheel-only",
+    "managed_python_archive_hash_locked": false,
+    "run_network_use_authorized": false,
+    "network_adapters_imported": false,
+    "os_network_isolation_enforced": false,
+    "credentials_allowed": false,
+    "private_api_allowed": false,
+    "orders_allowed": false,
+    "live_execution_allowed": false
+  }
+}

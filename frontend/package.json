@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
-    "test": "node --test tests/environment-contract.test.mjs"
+    "test": "node --test tests/environment-contract.test.mjs tests/historical-replay-console.browser.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

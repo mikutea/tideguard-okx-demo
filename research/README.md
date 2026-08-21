@@ -1,7 +1,8 @@
 # 墨衡第三方研究层
 
-这里不是第二套交易机器人。第三方库只在隔离的 Python 3.11 研究环境中读取
-`market-data.sqlite3` 的不可变公共快照，并输出 canonical JSON 评估证据：
+这里不是第二套交易机器人。常规模型库只在隔离的 Python 3.11 研究环境中读取
+`market-data.sqlite3` 的不可变公共快照；NautilusTrader PoC 另用项目内隔离的
+Python 3.12 sidecar。两者都只输出 canonical JSON 研究证据：
 
 - 不读取 Windows Credential Manager；
 - 不导入 `TradingService` 或订单端点，不实例化 OKX 私有客户端；
@@ -16,8 +17,9 @@ XGBoost、CatBoost、scikit-learn HistGradientBoosting、ExtraTrees 和 MLP。
 所有模型都从本机公共行情重新训练，不下载所谓“高收益权重”。
 
 QuantStats 只做周期收益指标交叉验证；Cryptofeed 只用于未来 OKX 公共
-WebSocket 数据采集。NautilusTrader、Qlib 与 FreqAI 通过后续 canonical JSON
-sidecar 协议对接，不进入墨衡凭证和执行进程。
+WebSocket 数据采集。NautilusTrader `2.0.0rc3` 以固定 wheel SHA-256 的独立
+Python 3.12 sidecar PoC 对接；Qlib 与 FreqAI 仍只保留后续 canonical JSON
+sidecar 边界。它们都不进入墨衡凭证、订单进程或桌面 EXE。
 
 结果默认写入项目内 `.research-data/`，该目录不进入 Git。只有脱敏、可复核的汇总
 才允许进入 `docs/` 和模型监督证据链。
@@ -100,14 +102,15 @@ SPOT long 仓位，否则持有现金；最短再次入场间隔候选为 48/96 
 OOS。任何结果仍固定为 `research_only` 和 `promotable=false`；只有新的 90 天
 前瞻公共 Shadow 才能提供新证据，且不会自动注册 champion、扩大白名单或下单。
 
-## Phase 3: 历史高速回放训练场
+## Phase 3: 历史高速回放训练场 V6
 
-V4 把内容寻址的多资产 cohort 变成一个因果历史时钟：每个模型只看当时已经完成
+V6 把内容寻址的多资产 cohort 变成一个因果历史时钟：每个模型只看当时已经完成
 标签的数据，使用 365 天滚动训练协议，其中末 30 天作为隔离校准窗、此前数据用于
-基础模型拟合；随后回放 30 天，再训练下一代模型。V4 标签严格对应确认线收盘决策、
-下一根开盘成交和 12 根后开盘退出，避免 V3 的训练目标与账本退出错配。虚拟 SPOT
-经纪商维护单一现金账本，并显式扣除双边手续费、滑点和历史成交量容量约束；超出
-容量的目标仓位只缩小到可成交规模并留下证据：
+基础模型拟合；随后回放 30 天，再训练下一代模型。确认线收盘与下一根 K 线开盘
+位于同一时间戳边界，故在已对齐的执行时钟上使用 `latency=0` 入场，并在 12 根后
+的开盘退出。标签 horizon 为 12 bars，另加 1-bar embargo，共保留 13 bars gap。
+虚拟 SPOT 经纪商维护单一现金账本，并显式扣除双边手续费、滑点和历史成交量容量
+约束；超出容量的目标仓位只缩小到可成交规模并留下证据：
 
 ```powershell
 # 单周期冒烟测试
@@ -116,17 +119,31 @@ V4 把内容寻址的多资产 cohort 变成一个因果历史时钟：每个模
 # 对最新冻结 cohort 运行所有可用的 30 天周期
 .\scripts\run-historical-replay.ps1
 
-# 独立复核哈希、因果时间线、逐笔延迟与现金账本
+# standalone 复核哈希、因果时间线、逐笔延迟与现金账本
 & ".\.research-data\runtime\venv\Scripts\python.exe" `
   .\research\verify_historical_replay.py `
-  .\.research-data\replays\historical-replay-v4-<timestamp>.json
+  .\.research-data\replays\historical-replay-v6-<timestamp>.json
 ```
 
-证据写入 `.research-data/replays/historical-replay-v4-*.json`，训练中心会以逐日权益
+证据写入 `.research-data/replays/historical-replay-v6-*.json`，训练中心会以逐日权益
 曲线、可播放时钟和模型更迭轨展示最新一份通过哈希校验的报告。播放器只重放报告，
 不会重新训练，也不会访问私有 API。
 
-这是回顾性开发工具，不是“刷模拟盘天数”：所有报告固定
+最终 V6 合同要求组合普通/压力和 BTC 普通/压力四套账本都声明
+`checkpointValuationBasis=current_bar_open_at_checkpoint_boundary`，保留峰谷见证和
+精确检查点，并满足 `cash + positionMarketValue = equity`。报告采用独占锁、唯一
+临时文件和 fail-if-exists 原子重命名；同名并发写入只能有一个成功，旧证据不可覆盖。
+
+V5 在已经代表“确认收盘/下一根开盘”的时间边界之后又施加一根 K 线延迟，实际
+入场比预定合同晚 5 分钟，因此其报告已退役。旧文件和数值保留用于审计，但不得再
+称为 canonical、用于模型晋级或与 V6 结果直接拼接。V6 已完整运行两次，结果与
+验证器明确定义的稳定核心 digest 均一致，并通过结构/逐笔账本完整性 verifier；
+该 verifier 不从冻结源数据重新训练或重放，输出固定声明
+`sourceReplayVerified=false`。完整数值、哈希和仍然阻断上线的条件见
+`docs/reports/v6-execution-semantics/report.md`。
+
+这是只使用公开行情的回顾性开发工具，不是“刷模拟盘天数”：所有报告固定
 `research_only / promotable=false / shadowDaysCredited=0`，并保留固定幸存者偏差、
 静态 OHLCV 成交模型、缺少历史订单簿和仍需 90 天未来公共 Shadow 等阻断项。
-历史回放能更快淘汰差策略，不能证明未来盈利。
+历史回放能更快淘汰差策略，不能证明未来盈利，也不会扩大当前仅 `BTC-USDT` 的
+执行白名单。

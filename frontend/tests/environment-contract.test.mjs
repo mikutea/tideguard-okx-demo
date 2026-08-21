@@ -112,3 +112,32 @@ test("empty research state is not labeled as confirmed history", async () => {
   assert.match(chartSource, /等待首次回填/);
   assert.match(dataSource, /等待首次全量回填/);
 });
+
+test("historical replay UI maps report v4 to V6 and explicitly retires V5", async () => {
+  const source = await readFile(new URL("../src/components/HistoricalReplayConsole.tsx", import.meta.url), "utf8");
+  assert.match(source, /moheng\.historical-replay-report\.v4/);
+  assert.match(source, /moheng\.historical-replay-report\.v3/);
+  assert.match(source, /V5 · 已退役/);
+  assert.match(source, /V5 因额外等待一根 5 分钟 K 线已退役/);
+  assert.match(source, /等待 V6 BTC 切片证据/);
+  assert.doesNotMatch(source, /等待\s+V5\s+证据/);
+});
+
+test("historical replay UI exposes the V6 semantic safety contract", async () => {
+  const componentSource = await readFile(new URL("../src/components/HistoricalReplayConsole.tsx", import.meta.url), "utf8");
+  const typesSource = await readFile(new URL("../src/types.ts", import.meta.url), "utf8");
+  for (const field of [
+    "executionSemantics",
+    "monitorContractValid",
+    "independentVerificationRequired",
+    "retiredSemanticMismatch",
+  ]) {
+    assert.match(componentSource, new RegExp(`replay\\.${field}`));
+    assert.match(typesSource, new RegExp(`${field}:`));
+  }
+  assert.match(componentSource, /执行语义/);
+  assert.match(componentSource, /监控契约/);
+  assert.match(componentSource, /独立证据复核/);
+  assert.match(componentSource, /旧语义退役/);
+  assert.match(componentSource, /历史结果仍不是前瞻收益或成交证明/);
+});

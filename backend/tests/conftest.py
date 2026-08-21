@@ -16,6 +16,14 @@ def isolate_user_credentials_and_environment(
     monkeypatch.setenv(
         "MOHENG_RESEARCH_DATA_DIR", str(tmp_path / ".research-data")
     )
+    for variable in (
+        "OKX_API_KEY",
+        "OKX_API_SECRET",
+        "OKX_API_PASSPHRASE",
+        "OKX_SECRET_KEY",
+        "OKX_PASSPHRASE",
+    ):
+        monkeypatch.delenv(variable, raising=False)
 
     import okx_demo_lab.okx_client as client_module
     import okx_demo_lab.secrets as secrets_module

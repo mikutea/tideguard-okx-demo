@@ -20,6 +20,9 @@ const SPEEDS = [
   { delay: 42, label: "32×" },
 ] as const;
 
+const V6_SCHEMA_VERSION = "moheng.historical-replay-report.v4";
+const V5_SCHEMA_VERSION = "moheng.historical-replay-report.v3";
+
 const executionSliceFailureLabels: Record<string, string> = {
   execution_slice_trades_insufficient: "BTC 闭环样本少于 20 笔",
   execution_slice_net_return_not_positive: "BTC 常规成本净收益未转正",
@@ -64,10 +67,11 @@ function drawdownPercent(value: number | null | undefined): string {
     : `${Math.abs(value * 100).toFixed(2)}%`;
 }
 
-function ReplayEmpty({ invalid = false }: { invalid?: boolean }) {
+function ReplayEmpty({ invalid = false, replay }: { invalid?: boolean; replay?: HistoricalReplayStatus }) {
+  const retired = replay?.retiredSemanticMismatch === true;
   return <section className={`workspace-panel replay-console replay-empty ${invalid ? "invalid" : ""}`} aria-labelledby="replay-title">
     <div className="panel-heading"><div><h2 id="replay-title">历史高速回放训练场</h2><p>把冻结历史按时间顺序喂给周期模型，观察成本后的虚拟资金轨迹</p></div><LockKeyhole size={20} /></div>
-    <div className="visual-empty tall"><CircleDashed /><div><strong>{invalid ? "回放证据完整性校验失败" : "等待第一份历史回放证据"}</strong><span>{invalid ? "哈希或安全边界不符合契约，界面拒绝展示结果。" : "运行研究回放后，这里会出现训练周期、虚拟资金和逐日播放控件。"}</span></div></div>
+    <div className="visual-empty tall"><CircleDashed /><div><strong>{invalid ? "回放证据完整性校验失败" : "等待第一份 V6 历史回放证据"}</strong><span>{invalid ? `监控契约未通过；${retired ? "该报告采用已退役的 V5 或更早执行语义；" : "执行语义或哈希不符合 V6 契约；"}独立证据复核仍为必需，界面拒绝展示结果。` : "运行 V6 研究回放后，这里会出现训练周期、虚拟资金和逐日播放控件；V5 已退役，仅保留审计。"}</span></div></div>
   </section>;
 }
 
@@ -118,7 +122,7 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
   }, [checkpoints, cursor]);
 
   if (!replay) return <ReplayEmpty />;
-  if (!replay.valid) return <ReplayEmpty invalid />;
+  if (!replay.valid) return <ReplayEmpty invalid replay={replay} />;
 
   const checkpoint = checkpoints[Math.min(cursor, Math.max(0, checkpoints.length - 1))];
   const checkpointTime = checkpoint ? new Date(checkpoint.at).getTime() : Number.NaN;
@@ -140,6 +144,20 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
     ? activeEpisode.rawBrier - activeEpisode.calibratedBrier
     : null;
   const executionSlice = replay.executionSlice;
+  const isV6 = replay.schemaVersion === V6_SCHEMA_VERSION;
+  const protocolLabel = isV6
+    ? "V6"
+    : replay.schemaVersion === V5_SCHEMA_VERSION
+      ? "V5 · 已退役"
+      : "旧语义 · 已退役";
+  const executionSemanticsLabel = replay.executionSemantics === "corrected_next_open_boundary"
+    ? "共同时间边界 · 零额外延迟"
+    : "旧执行语义 · 不可用于晋级";
+  const v6ContractReady = isV6
+    && replay.monitorContractValid
+    && replay.independentVerificationRequired
+    && replay.executionSemantics === "corrected_next_open_boundary"
+    && !replay.retiredSemanticMismatch;
 
   const selectEpisode = (startAt: string | null) => {
     if (!startAt) return;
@@ -151,7 +169,7 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
 
   return <section className="workspace-panel replay-console" aria-labelledby="replay-title">
     <div className="replay-titlebar">
-      <div className="replay-title-copy"><span className="replay-kicker"><BrainCircuit size={15} />CAUSAL REPLAY LAB · {replay.schemaVersion?.endsWith(".v3") ? "V5" : "V4"}</span><h2 id="replay-title">执行对齐历史回放训练场</h2><p>365 天滚动训练、末 30 天隔离校准；标签严格对应下一根开盘成交与 12 根后退出。V5 额外隔离显示 BTC-USDT 可执行切片，播放器不触发训练、私有 API 或订单。</p></div>
+      <div className="replay-title-copy"><span className="replay-kicker"><BrainCircuit size={15} />CAUSAL REPLAY LAB · {protocolLabel}</span><h2 id="replay-title">执行对齐历史回放训练场</h2><p>V6 将确认线收盘与下一根开盘视为同一时间边界，以零额外延迟入场、12 根后开盘退出。V5 因额外等待一根 5 分钟 K 线已退役；播放器不触发训练、私有 API 或订单。</p></div>
       <div className="replay-safety-stamp" aria-label="历史回放安全边界"><ShieldCheck size={19} /><div><strong>研究隔离</strong><span>0 Shadow 天 · 0 下单能力</span></div></div>
     </div>
 
@@ -159,7 +177,7 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
       <div><span>模拟跨度</span><strong>{formatNumber(replay.simulatedDays, 0)} 天</strong><small>{replayDate(replay.firstReplayAt)} — {replayDate(replay.lastReplayAt)}</small></div>
       <div><span>周期更迭</span><strong>{replay.episodeCount} 代</strong><small>每 {formatNumber(replay.retrainEveryDays, 0)} 天重训</small></div>
       <div><span>多币组合历史收益</span><strong className={finite(replay.netReturn) < 0 ? "negative" : "positive"}>{formatPercent(replay.netReturn)}</strong><small>{formatNumber(replay.ordinaryCostBps, 0)} bps 往返 · 研究口径</small></div>
-      <div><span>BTC 可执行切片</span><strong className={finite(executionSlice?.netReturn) < 0 ? "negative" : "positive"}>{formatPercent(executionSlice?.netReturn)}</strong><small>{executionSlice ? `${executionSlice.trades} 笔 · 压力 ${formatPercent(executionSlice.stressNetReturn)}` : "等待 V5 证据"}</small></div>
+      <div><span>BTC 可执行切片</span><strong className={finite(executionSlice?.netReturn) < 0 ? "negative" : "positive"}>{formatPercent(executionSlice?.netReturn)}</strong><small>{executionSlice ? `${executionSlice.trades} 笔 · 压力 ${formatPercent(executionSlice.stressNetReturn)}` : "等待 V6 BTC 切片证据"}</small></div>
       <div><span>组合压力成本收益</span><strong className={finite(replay.stressNetReturn) < 0 ? "negative" : "positive"}>{formatPercent(replay.stressNetReturn)}</strong><small>48 bps 往返</small></div>
       <div><span>组合最大回撤</span><strong>{drawdownPercent(replay.maxDrawdown)}</strong><small>{replay.tradeCount} 笔闭环 · 非未来承诺</small></div>
     </div>
@@ -208,12 +226,17 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
           <div><dt>模型族</dt><dd>{replay.family ?? "—"}</dd></div>
           <div><dt>周期 ID</dt><dd><code>{shortId(activeEpisode?.episodeId, 14)}</code></dd></div>
           <div><dt>模型可用</dt><dd>{formatTime(activeEpisode?.availableAt)}</dd></div>
+          <div><dt>执行语义</dt><dd className={replay.executionSemantics === "corrected_next_open_boundary" ? "positive" : "negative"}>{executionSemanticsLabel}</dd></div>
+          <div><dt>监控契约</dt><dd className={replay.monitorContractValid ? "positive" : "negative"}>{replay.monitorContractValid ? "V6 契约通过" : "未通过 · 结果锁定"}</dd></div>
+          <div><dt>独立证据复核</dt><dd className={replay.independentVerificationRequired ? "negative" : undefined}>{replay.independentVerificationRequired ? "必需 · 尚不能据此上线" : "后端未声明 · 按未核验处理"}</dd></div>
+          <div><dt>旧语义退役</dt><dd className={replay.retiredSemanticMismatch ? "negative" : "positive"}>{replay.retiredSemanticMismatch ? "是 · V5 或更早仅供审计" : "否 · 当前为 V6"}</dd></div>
           <div><dt>标签与成交对齐</dt><dd className={replay.targetExecutionAligned ? "positive" : "negative"}>{replay.targetExecutionAligned ? "已验证" : "未验证"}</dd></div>
           <div><dt>容量处理</dt><dd>{replay.capacityHandling === "clip" ? `缩量成交 · ${replay.ordersClipped} 笔` : replay.capacityHandling ?? "—"}</dd></div>
           <div><dt>本代训练耗时</dt><dd>{formatNumber(activeEpisode?.trainingSeconds, 2)} 秒</dd></div>
           <div><dt>校准改善</dt><dd className={calibratedDelta === null ? undefined : calibratedDelta >= 0 ? "positive" : "negative"}>{calibratedDelta === null ? "—" : `${calibratedDelta >= 0 ? "+" : ""}${calibratedDelta.toFixed(4)}`}</dd></div>
           <div><dt>此刻回撤</dt><dd>{drawdownPercent(checkpoint?.drawdown)}</dd></div>
         </dl>
+        <div className={`replay-gate ${v6ContractReady ? "passed" : "blocked"}`}><ShieldCheck size={18} /><div><strong>{v6ContractReady ? "V6 监控契约通过，仍需独立复核" : "回放语义已退役或契约未通过"}</strong><span>{v6ContractReady ? "该状态只证明监控读取符合 V6 合同；历史结果仍不是前瞻收益或成交证明。" : "V5 及更早报告只保留审计，不得与 V6 拼接、用于模型晋级或触发交易。"}</span></div></div>
         <div className={`replay-gate ${replay.developmentGatePassed ? "passed" : "blocked"}`}><LockKeyhole size={18} /><div><strong>{replay.developmentGatePassed ? "历史开发门槛通过，仍不可晋级" : "历史开发门槛未通过"}</strong><span>{replay.selectionBiasWarning ? "本段历史已用于诊断，正收益可能偏乐观；" : ""}历史回放永远不累计 Shadow 天数，也不修改 BTC-USDT 执行白名单。</span></div></div>
         {executionSlice ? <div className={`replay-gate ${executionSlice.developmentGatePassed ? "passed" : "blocked"}`}><LockKeyhole size={18} /><div><strong>{executionSlice.developmentGatePassed ? "BTC 可执行切片通过开发门" : "BTC 可执行切片仍未达门"}</strong><span>{executionSlice.developmentGatePassed ? "仍需前瞻 Shadow 与 Demo 闭环。" : executionSlice.failures.map((failure) => executionSliceFailureLabels[failure] ?? failure).join("；")}</span></div></div> : null}
       </aside>

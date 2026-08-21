@@ -10,7 +10,8 @@ from .multi_asset_market import FIVE_MINUTES_MS
 from .pipeline import DEFAULT_LABEL_HORIZON
 
 
-HISTORICAL_REPLAY_SCHEMA_VERSION = "moheng.historical-replay.v2"
+HISTORICAL_REPLAY_SCHEMA_VERSION = "moheng.historical-replay.v3"
+CHECKPOINT_VALUATION_BASIS = "current_bar_open_at_checkpoint_boundary"
 
 
 class HistoricalReplayError(ValueError):
@@ -54,11 +55,11 @@ class ReplayBrokerConfig:
             or not 0.0 <= parsed["slippage_bps_per_side"] <= 500.0
             or not 0.0 < parsed["max_quote_volume_participation"] <= 0.05
             or not 0.0 < parsed["minimum_notional"] <= parsed["starting_cash"]
-            or isinstance(self.latency_bars, bool)
-            or self.latency_bars < 1
-            or isinstance(self.holding_period_bars, bool)
+            or type(self.latency_bars) is not int
+            or self.latency_bars < 0
+            or type(self.holding_period_bars) is not int
             or self.holding_period_bars < 1
-            or isinstance(self.checkpoint_stride_bars, bool)
+            or type(self.checkpoint_stride_bars) is not int
             or self.checkpoint_stride_bars < 1
             or not isinstance(self.capacity_handling, str)
             or self.capacity_handling not in {"reject", "clip"}
@@ -109,7 +110,7 @@ class ReplayPolicy:
         edge = _finite(self.edge_buffer_bps, "edge_buffer_bps")
         if (
             not 0.0 <= edge <= 1_000.0
-            or isinstance(self.min_entry_spacing_bars, bool)
+            or type(self.min_entry_spacing_bars) is not int
             or self.min_entry_spacing_bars < DEFAULT_LABEL_HORIZON
         ):
             raise HistoricalReplayError("replay policy is invalid")
@@ -235,6 +236,7 @@ def run_historical_replay(
     *,
     policy: ReplayPolicy,
     broker: ReplayBrokerConfig,
+    known_quote_volumes: np.ndarray,
 ) -> dict[str, Any]:
     """Replay frozen predictions through a causal next-bar SPOT cash ledger."""
 
@@ -246,6 +248,16 @@ def run_historical_replay(
         episode_indices,
         episodes,
     )
+    capacity_volumes = np.asarray(known_quote_volumes, dtype=np.float64)
+    if (
+        capacity_volumes.shape != (timestamps.size, len(names))
+        or not np.all(np.isfinite(capacity_volumes))
+        or np.any(capacity_volumes < 0.0)
+    ):
+        raise HistoricalReplayError(
+            "known quote-volume capacity inputs are not aligned"
+        )
+    capacity_volumes.flags.writeable = False
     fee_rate = broker.fee_bps_per_side / 10_000.0
     slippage_rate = broker.slippage_bps_per_side / 10_000.0
     required_expected = (
@@ -257,7 +269,15 @@ def run_historical_replay(
     )
     cash = broker.starting_cash
     peak_equity = broker.starting_cash
+    peak_at = _iso_from_ms(int(timestamps[0]))
+    peak_source = "pre_replay_starting_cash"
+    peak_checkpoint: dict[str, Any] | None = None
     max_drawdown = 0.0
+    max_drawdown_peak_at = peak_at
+    max_drawdown_peak_equity = peak_equity
+    max_drawdown_peak_source = peak_source
+    max_drawdown_peak_checkpoint: dict[str, Any] | None = None
+    max_drawdown_trough: dict[str, Any] | None = None
     exposure_bars = 0
     evaluated_decisions = 0
     qualifying_signals = 0
@@ -278,6 +298,78 @@ def run_historical_replay(
     turnover_notional = 0.0
     total_capacity_clip_notional = 0.0
 
+    def execute_pending_entry(index: int) -> None:
+        nonlocal cash
+        nonlocal estimated_slippage_cost
+        nonlocal open_position
+        nonlocal orders_clipped
+        nonlocal orders_rejected
+        nonlocal orders_submitted
+        nonlocal pending_entry
+        nonlocal total_capacity_clip_notional
+        nonlocal total_fees
+        nonlocal turnover_notional
+
+        if pending_entry is None or index != pending_entry[0]:
+            return
+        (
+            _entry_index,
+            signal_index,
+            asset_index,
+            expected_gross,
+            episode_index,
+        ) = pending_entry
+        orders_submitted += 1
+        raw_entry_price = float(candle_values[index, asset_index, 0])
+        entry_fill_price = raw_entry_price * (1.0 + slippage_rate)
+        available_cash = cash * broker.allocation_fraction
+        desired_entry_notional = available_cash / (1.0 + fee_rate)
+        entry_notional = desired_entry_notional
+        quote_volume = float(capacity_volumes[index, asset_index])
+        capacity = quote_volume * broker.max_quote_volume_participation
+        rejection: str | None = None
+        if entry_notional < broker.minimum_notional:
+            rejection = "minimum_notional_unavailable"
+        elif entry_notional > capacity:
+            if (
+                broker.capacity_handling == "clip"
+                and capacity >= broker.minimum_notional
+            ):
+                entry_notional = capacity
+                orders_clipped += 1
+                total_capacity_clip_notional += desired_entry_notional - entry_notional
+            else:
+                rejection = "quote_volume_capacity_exceeded"
+        if rejection is not None:
+            orders_rejected += 1
+            rejection_reasons[rejection] = rejection_reasons.get(rejection, 0) + 1
+        else:
+            quantity = entry_notional / entry_fill_price
+            entry_fee = entry_notional * fee_rate
+            cash_out = entry_notional + entry_fee
+            cash -= cash_out
+            total_fees += entry_fee
+            estimated_slippage_cost += quantity * (
+                entry_fill_price - raw_entry_price
+            )
+            turnover_notional += entry_notional
+            open_position = _OpenPosition(
+                trade_id=f"replay_trade_{signal_index:09d}_{asset_index:02d}",
+                instrument_index=asset_index,
+                signal_index=signal_index,
+                entry_index=index,
+                exit_index=index + broker.holding_period_bars,
+                episode_index=episode_index,
+                expected_gross_return=expected_gross,
+                quantity=quantity,
+                raw_entry_price=raw_entry_price,
+                entry_fill_price=entry_fill_price,
+                entry_notional=entry_notional,
+                entry_fee=entry_fee,
+                cash_out=cash_out,
+            )
+        pending_entry = None
+
     for index in range(time_rows):
         if open_position is not None and index == open_position.exit_index:
             position = open_position
@@ -295,8 +387,7 @@ def run_historical_replay(
             gross_pnl += raw_gross_pnl
             total_fees += exit_fee
             estimated_slippage_cost += position.quantity * (
-                (position.entry_fill_price - position.raw_entry_price)
-                + (raw_exit_price - exit_fill_price)
+                raw_exit_price - exit_fill_price
             )
             turnover_notional += exit_notional
             instrument = names[position.instrument_index]
@@ -328,100 +419,7 @@ def run_historical_replay(
             )
             open_position = None
 
-        if pending_entry is not None and index == pending_entry[0]:
-            (
-                _entry_index,
-                signal_index,
-                asset_index,
-                expected_gross,
-                episode_index,
-            ) = pending_entry
-            orders_submitted += 1
-            raw_entry_price = float(candle_values[index, asset_index, 0])
-            entry_fill_price = raw_entry_price * (1.0 + slippage_rate)
-            available_cash = cash * broker.allocation_fraction
-            desired_entry_notional = available_cash / (1.0 + fee_rate)
-            entry_notional = desired_entry_notional
-            quote_volume = float(candle_values[index, asset_index, 6])
-            capacity = quote_volume * broker.max_quote_volume_participation
-            rejection: str | None = None
-            if entry_notional < broker.minimum_notional:
-                rejection = "minimum_notional_unavailable"
-            elif entry_notional > capacity:
-                if (
-                    broker.capacity_handling == "clip"
-                    and capacity >= broker.minimum_notional
-                ):
-                    entry_notional = capacity
-                    orders_clipped += 1
-                    total_capacity_clip_notional += (
-                        desired_entry_notional - entry_notional
-                    )
-                else:
-                    rejection = "quote_volume_capacity_exceeded"
-            if rejection is not None:
-                orders_rejected += 1
-                rejection_reasons[rejection] = rejection_reasons.get(rejection, 0) + 1
-            else:
-                quantity = entry_notional / entry_fill_price
-                entry_fee = entry_notional * fee_rate
-                cash_out = entry_notional + entry_fee
-                cash -= cash_out
-                total_fees += entry_fee
-                estimated_slippage_cost += quantity * (
-                    entry_fill_price - raw_entry_price
-                )
-                turnover_notional += entry_notional
-                open_position = _OpenPosition(
-                    trade_id=f"replay_trade_{signal_index:09d}_{asset_index:02d}",
-                    instrument_index=asset_index,
-                    signal_index=signal_index,
-                    entry_index=index,
-                    exit_index=index + broker.holding_period_bars,
-                    episode_index=episode_index,
-                    expected_gross_return=expected_gross,
-                    quantity=quantity,
-                    raw_entry_price=raw_entry_price,
-                    entry_fill_price=entry_fill_price,
-                    entry_notional=entry_notional,
-                    entry_fee=entry_fee,
-                    cash_out=cash_out,
-                )
-            pending_entry = None
-
-        position_market_value = 0.0
-        if open_position is not None:
-            exposure_bars += 1
-            close_price = float(
-                candle_values[index, open_position.instrument_index, 3]
-            )
-            liquidation_notional = (
-                open_position.quantity * close_price * (1.0 - slippage_rate)
-            )
-            position_market_value = liquidation_notional * (1.0 - fee_rate)
-        equity = cash + position_market_value
-        peak_equity = max(peak_equity, equity)
-        drawdown = (peak_equity - equity) / peak_equity if peak_equity else 1.0
-        max_drawdown = max(max_drawdown, drawdown)
-        if (
-            index == 0
-            or index == time_rows - 1
-            or index % broker.checkpoint_stride_bars == 0
-        ):
-            checkpoints.append(
-                {
-                    "at": _iso_from_ms(int(timestamps[index])),
-                    "cash": cash,
-                    "drawdown": drawdown,
-                    "equity": equity,
-                    "positionInstrument": (
-                        names[open_position.instrument_index]
-                        if open_position is not None
-                        else None
-                    ),
-                    "positionMarketValue": position_market_value,
-                }
-            )
+        execute_pending_entry(index)
 
         if (
             index <= last_signal_index
@@ -443,8 +441,78 @@ def run_historical_replay(
                 )
                 next_entry_signal_index = index + policy.min_entry_spacing_bars
 
+        # A zero-latency replay row represents the exact boundary at which the
+        # preceding confirmed candle closes and the next candle opens.  Execute
+        # only after the causal decision has been evaluated, never from an
+        # unconfirmed source candle.
+        execute_pending_entry(index)
+
+        position_market_value = 0.0
+        if open_position is not None:
+            exposure_bars += 1
+            # Checkpoints are stamped at the current candle's open boundary.
+            # Marking with that candle's close would move five minutes of future
+            # price information backwards into both equity and drawdown.
+            boundary_price = float(
+                candle_values[index, open_position.instrument_index, 0]
+            )
+            liquidation_notional = (
+                open_position.quantity * boundary_price * (1.0 - slippage_rate)
+            )
+            position_market_value = liquidation_notional * (1.0 - fee_rate)
+        equity = cash + position_market_value
+        if equity > peak_equity:
+            peak_equity = equity
+            peak_at = _iso_from_ms(int(timestamps[index]))
+            peak_source = "checkpoint"
+        drawdown = (peak_equity - equity) / peak_equity if peak_equity else 1.0
+        boundary_checkpoint = {
+            "at": _iso_from_ms(int(timestamps[index])),
+            "cash": cash,
+            "drawdown": drawdown,
+            "equity": equity,
+            "peakEquity": peak_equity,
+            "positionInstrument": (
+                names[open_position.instrument_index]
+                if open_position is not None
+                else None
+            ),
+            "positionMarketValue": position_market_value,
+        }
+        if peak_source == "checkpoint" and peak_at == boundary_checkpoint["at"]:
+            peak_checkpoint = dict(boundary_checkpoint)
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+            max_drawdown_peak_at = peak_at
+            max_drawdown_peak_equity = peak_equity
+            max_drawdown_peak_source = peak_source
+            max_drawdown_peak_checkpoint = (
+                dict(peak_checkpoint) if peak_checkpoint is not None else None
+            )
+            max_drawdown_trough = dict(boundary_checkpoint)
+        if (
+            index == 0
+            or index == time_rows - 1
+            or index % broker.checkpoint_stride_bars == 0
+        ):
+            checkpoints.append(boundary_checkpoint)
+
     if open_position is not None or pending_entry is not None:
         raise HistoricalReplayError("historical replay ended with unsettled state")
+    if max_drawdown_trough is None:
+        max_drawdown_trough = dict(checkpoints[0])
+    required_checkpoints = [max_drawdown_trough]
+    if max_drawdown_peak_source == "checkpoint":
+        if (
+            max_drawdown_peak_checkpoint is None
+            or max_drawdown_peak_checkpoint["at"] != max_drawdown_peak_at
+        ):
+            raise HistoricalReplayError("maximum drawdown peak checkpoint was lost")
+        required_checkpoints.append(max_drawdown_peak_checkpoint)
+    checkpoints_by_at = {item["at"]: item for item in checkpoints}
+    for item in required_checkpoints:
+        checkpoints_by_at[item["at"]] = item
+    checkpoints = [checkpoints_by_at[key] for key in sorted(checkpoints_by_at)]
     final_equity = cash
     total_days = time_rows / 288.0
     profitable_trades = sum(item["netPnl"] > 0.0 for item in trades)
@@ -458,11 +526,22 @@ def run_historical_replay(
         "grossPnlReturn": gross_pnl / broker.starting_cash,
         "leakageGuard": {
             "causalEpisodeBinding": True,
-            "nextBarExecution": True,
+            "checkpointValuationBasis": CHECKPOINT_VALUATION_BASIS,
+            "decisionToFillBars": broker.latency_bars,
+            "executionCoordinate": "decision_rows",
+            "nextDecisionRowFill": broker.latency_bars == 1,
             "predictionRowsAvailableBeforeDecision": True,
-            "sameBarFillAllowed": False,
+            "sameDecisionRowFill": broker.latency_bars == 0,
         },
         "maxDrawdown": max_drawdown,
+        "maxDrawdownWitness": {
+            "drawdown": max_drawdown,
+            "peakAt": max_drawdown_peak_at,
+            "peakEquity": max_drawdown_peak_equity,
+            "peakSource": max_drawdown_peak_source,
+            "troughAt": max_drawdown_trough["at"],
+            "troughEquity": max_drawdown_trough["equity"],
+        },
         "netPnlByInstrument": net_pnl_by_instrument,
         "netReturn": final_equity / broker.starting_cash - 1.0,
         "ordersRejected": orders_rejected,
@@ -487,6 +566,7 @@ def run_historical_replay(
 
 
 __all__ = [
+    "CHECKPOINT_VALUATION_BASIS",
     "HISTORICAL_REPLAY_SCHEMA_VERSION",
     "HistoricalReplayError",
     "ReplayBrokerConfig",

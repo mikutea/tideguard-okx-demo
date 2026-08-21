@@ -11,8 +11,6 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $DataRoot = Join-Path $ProjectRoot ".research-data"
 $ResearchPython = Join-Path $DataRoot "runtime\venv\Scripts\python.exe"
 $Replay = Join-Path $ProjectRoot "research\historical_replay.py"
-$env:TEMP = Join-Path $DataRoot "runtime-tmp"
-$env:TMP = $env:TEMP
 New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
 
 if (-not $CohortManifest) {
@@ -25,7 +23,7 @@ if (-not $CohortManifest) {
 }
 if (-not $Output) {
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
-    $Output = Join-Path $DataRoot "replays\historical-replay-v5-$stamp.json"
+    $Output = Join-Path $DataRoot "replays\historical-replay-v6-$stamp.json"
 }
 if (-not (Test-Path -LiteralPath $ResearchPython -PathType Leaf)) {
     throw "Research runtime is missing. Run scripts/setup-research.ps1 first."
@@ -41,17 +39,52 @@ if ($null -ne $MaxEpisodes) {
     $arguments += @("--max-episodes", [string]$MaxEpisodes)
 }
 
-$PreviousPythonPath = $env:PYTHONPATH
-$env:PYTHONPATH = Join-Path $ProjectRoot "backend\src"
-Push-Location $ProjectRoot
+$ScopedEnvironment = [ordered]@{
+    TEMP = Join-Path $DataRoot "runtime-tmp"
+    TMP = Join-Path $DataRoot "runtime-tmp"
+    PYTHONPATH = Join-Path $ProjectRoot "backend\src"
+    PYTHONNOUSERSITE = "1"
+    PYTHONDONTWRITEBYTECODE = "1"
+    OKX_API_KEY = $null
+    OKX_API_SECRET = $null
+    OKX_API_PASSPHRASE = $null
+    OKX_SECRET_KEY = $null
+    OKX_PASSPHRASE = $null
+}
+$SavedEnvironment = @{}
+foreach ($entry in $ScopedEnvironment.GetEnumerator()) {
+    $SavedEnvironment[$entry.Key] = [Environment]::GetEnvironmentVariable(
+        $entry.Key,
+        "Process"
+    )
+    [Environment]::SetEnvironmentVariable(
+        $entry.Key,
+        $entry.Value,
+        "Process"
+    )
+}
+$LocationPushed = $false
 try {
+    Push-Location $ProjectRoot
+    $LocationPushed = $true
     & $ResearchPython @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "The historical replay failed with exit code $LASTEXITCODE."
     }
 } finally {
-    Pop-Location
-    $env:PYTHONPATH = $PreviousPythonPath
+    try {
+        if ($LocationPushed) {
+            Pop-Location
+        }
+    } finally {
+        foreach ($entry in $ScopedEnvironment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable(
+                $entry.Key,
+                $SavedEnvironment[$entry.Key],
+                "Process"
+            )
+        }
+    }
 }
 
-Write-Host "V5 execution-readiness historical replay evidence: $Output"
+Write-Host "V6 corrected execution-semantics historical replay evidence: $Output"

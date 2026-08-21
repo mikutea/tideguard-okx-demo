@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover - direct script execution
         _score_diagnostics,
     )
 from okx_demo_lab.ml.historical_replay import (
+    CHECKPOINT_VALUATION_BASIS,
     HISTORICAL_REPLAY_SCHEMA_VERSION,
     HistoricalReplayError,
     ReplayBrokerConfig,
@@ -60,7 +61,7 @@ from okx_demo_lab.ml.walk_forward import (
 )
 
 
-REPLAY_REPORT_SCHEMA_VERSION = "moheng.historical-replay-report.v3"
+REPLAY_REPORT_SCHEMA_VERSION = "moheng.historical-replay-report.v4"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESEARCH_DATA_ROOT = PROJECT_ROOT / ".research-data"
 TRAIN_BARS = 365 * 24 * 12
@@ -91,12 +92,14 @@ STANDARD_BROKER = ReplayBrokerConfig(
     slippage_bps_per_side=4.0,
     checkpoint_stride_bars=288,
     capacity_handling="clip",
+    latency_bars=0,
 )
 STRESS_BROKER = ReplayBrokerConfig(
     fee_bps_per_side=8.0,
     slippage_bps_per_side=16.0,
     checkpoint_stride_bars=288,
     capacity_handling="clip",
+    latency_bars=0,
 )
 EXECUTION_PURGE_BARS = STANDARD_BROKER.execution_label_horizon_bars + 1
 PROMOTION_BLOCKERS = (
@@ -107,6 +110,7 @@ PROMOTION_BLOCKERS = (
     "no_fresh_sealed_oos",
     "historical_order_book_unavailable",
     "static_ohlcv_fill_model",
+    "instantaneous_next_open_fill_assumption",
     "requires_90_day_forward_public_shadow",
     "manual_model_review_required",
 )
@@ -276,11 +280,14 @@ def _execution_slice_failures(
     return failures
 
 
-def _summary(result: dict[str, Any]) -> dict[str, Any]:
+def _summary(
+    result: dict[str, Any], *, include_checkpoints: bool = False
+) -> dict[str, Any]:
+    omitted = {"trades"} if include_checkpoints else {"checkpoints", "trades"}
     return {
         key: value
         for key, value in result.items()
-        if key not in {"checkpoints", "trades"}
+        if key not in omitted
     } | {"trades": len(result["trades"])}
 
 
@@ -291,6 +298,7 @@ def _evaluate_policies(
     expected_returns: np.ndarray,
     episode_indices: np.ndarray,
     bindings: Sequence[ReplayEpisodeBinding],
+    known_quote_volumes: np.ndarray,
 ) -> dict[str, Any]:
     policy_sensitivity: dict[str, Any] = {}
     ordinary_by_policy: dict[tuple[float, int], dict[str, Any]] = {}
@@ -305,6 +313,7 @@ def _evaluate_policies(
             bindings,
             policy=policy,
             broker=STANDARD_BROKER,
+            known_quote_volumes=known_quote_volumes,
         )
         failures = _development_failures(ordinary)
         ordinary_by_policy[(edge_buffer_bps, spacing_bars)] = ordinary
@@ -328,6 +337,7 @@ def _evaluate_policies(
         bindings,
         policy=chosen_policy,
         broker=STRESS_BROKER,
+        known_quote_volumes=known_quote_volumes,
     )
     stress_failures = _stress_failures(stress)
     try:
@@ -349,6 +359,9 @@ def _evaluate_policies(
         bindings,
         policy=chosen_policy,
         broker=STANDARD_BROKER,
+        known_quote_volumes=np.ascontiguousarray(
+            known_quote_volumes[:, execution_index : execution_index + 1]
+        ),
     )
     execution_stress = run_historical_replay(
         ("BTC-USDT",),
@@ -359,6 +372,9 @@ def _evaluate_policies(
         bindings,
         policy=chosen_policy,
         broker=STRESS_BROKER,
+        known_quote_volumes=np.ascontiguousarray(
+            known_quote_volumes[:, execution_index : execution_index + 1]
+        ),
     )
     execution_failures = _execution_slice_failures(
         execution_ordinary, execution_stress
@@ -383,14 +399,16 @@ def _evaluate_policies(
             "developmentGatePassed": not execution_failures,
             "failures": execution_failures,
             "instrument": "BTC-USDT",
-            "ordinary": _summary(execution_ordinary),
-            "stress48Bps": _summary(execution_stress),
+            "ordinary": _summary(execution_ordinary, include_checkpoints=True),
+            "stress48Bps": _summary(
+                execution_stress, include_checkpoints=True
+            ),
         },
         "policySensitivity": policy_sensitivity,
         "promotionBlockers": list(PROMOTION_BLOCKERS),
         "shadowDaysCredited": 0,
         "stress48Bps": {
-            **_summary(stress),
+            **_summary(stress, include_checkpoints=True),
             "developmentGatePassed": not stress_failures,
             "failures": stress_failures,
         },
@@ -600,6 +618,13 @@ def run_replay_research(
     replay_candles = cohort.candles[
         raw_offset + replay_start : raw_offset + replay_stop
     ]
+    replay_known_quote_volumes = np.ascontiguousarray(
+        cohort.candles[
+            raw_offset + replay_start - 1 : raw_offset + replay_stop - 1,
+            :,
+            6,
+        ]
+    )
     expected_matrix = np.concatenate(expected_chunks, axis=0)
     episode_indices = np.concatenate(episode_index_chunks, axis=0)
     if (
@@ -615,6 +640,7 @@ def run_replay_research(
         expected_matrix,
         episode_indices,
         bindings,
+        replay_known_quote_volumes,
     )
     replay_seconds = time.perf_counter() - replay_started
     total_seconds = time.perf_counter() - wall_started
@@ -626,17 +652,19 @@ def run_replay_research(
         "completedAt": _iso(_utc_now()),
         "dataset": {
             "assetRows": dataset.asset_rows,
+            "capacityVolumeSource": "confirmed_feature_source_bar",
             "cohortId": dataset.cohort_id,
             "cohortSha256": dataset.cohort_sha256,
             "firstReplayAt": _iso_from_ms(int(replay_timestamps[0])),
             "instruments": list(dataset.instruments),
             "lastReplayAt": _iso_from_ms(int(replay_timestamps[-1])),
             "replayTimeRows": int(replay_timestamps.size),
-            "source": "okx-public-v5-confirmed-5m-frozen-cohort",
+            "source": "okx-public-v6-confirmed-5m-frozen-cohort",
         },
         "decision": "research_only",
         "episodes": episode_payloads,
         "execution": {
+            "checkpointValuationBasis": CHECKPOINT_VALUATION_BASIS,
             "decisionToFillLatencyBars": STANDARD_BROKER.latency_bars,
             "engineSchemaVersion": HISTORICAL_REPLAY_SCHEMA_VERSION,
             "executionAllowlistChanged": False,
@@ -647,10 +675,17 @@ def run_replay_research(
         },
         "leakageAudit": {
             "calibrationPurgeBars": EXECUTION_PURGE_BARS,
+            "checkpointValuationBasis": CHECKPOINT_VALUATION_BASIS,
+            "decisionToFillBars": STANDARD_BROKER.latency_bars,
             "episodeAvailabilityBound": True,
+            "featureSourceCloseToEntryBars": 0,
             "futureLabelsBeforeDecision": 0,
-            "nextBarExecution": True,
-            "sameBarFillAllowed": False,
+            "instantaneousDecisionFillAssumption": True,
+            "entryBarVolumeUsedExPost": False,
+            "decisionTimestampEqualsEntryTimestamp": True,
+            "nextCandleAfterFeatureSource": True,
+            "sameSourceBarFillAllowed": False,
+            "sameTimestampFillAllowed": True,
             "strictFiveMinuteGrid": True,
             "targetExecutionAligned": True,
         },
@@ -664,8 +699,8 @@ def run_replay_research(
             "spec": spec.to_dict(),
             "specSha256": spec.sha256,
             "targetContract": {
-                "decisionAt": "confirmed_bar_close",
-                "entryAt": "next_bar_open",
+                "decisionAt": "confirmed_bar_close_next_bar_open_boundary",
+                "entryAt": "next_bar_open_same_timestamp",
                 "exitAt": "entry_plus_12_bars_open",
                 "labelBreakEvenGrossReturnBps": (
                     STANDARD_BROKER.break_even_gross_return_bps
@@ -728,19 +763,50 @@ def run_replay_research(
 
 def _write_report(path: Path, report: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        raise ReplayResearchError("historical replay evidence already exists")
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    lock = path.with_name(path.name + ".lock")
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
     )
-    os.replace(temporary, path)
+    lock_fd: int | None = None
+    try:
+        try:
+            lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            raise ReplayResearchError(
+                "historical replay evidence writer is already active"
+            ) from exc
+        os.write(lock_fd, f"pid={os.getpid()}\n".encode("ascii"))
+        os.fsync(lock_fd)
+        if path.exists():
+            raise ReplayResearchError("historical replay evidence already exists")
+        temporary_fd = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        with os.fdopen(temporary_fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n"
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        # On Windows this is an atomic fail-if-target-exists rename.  The
+        # exclusive sibling lock serializes all supported writers on other
+        # platforms and prevents the old exists/replace clobber race.
+        os.rename(temporary, path)
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        if temporary.exists():
+            temporary.unlink()
+        if lock_fd is not None and lock.exists():
+            lock.unlink()
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the research-only V5 execution-readiness market replay."
+        description="Run the research-only V6 execution-semantics market replay."
     )
     parser.add_argument("--cohort", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

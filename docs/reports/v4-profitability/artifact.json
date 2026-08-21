@@ -3,8 +3,8 @@
   "manifest": {
     "version": 1,
     "surface": "report",
-    "title": "墨衡 V4 执行对齐历史收益诊断",
-    "description": "V3 到 V4 的目标契约修复、成本后收益、集中度和前瞻验证边界。",
+    "title": "墨衡 V4 已退役语义失配历史诊断",
+    "description": "RETIRED：旧数值仅用于审计额外一根 K 线延迟，不是 canonical、V6 对照或晋级证据。",
     "generatedAt": "2026-08-21T18:19:42.110Z",
     "cards": [
       {
@@ -63,7 +63,7 @@
           "tooltip": [
             { "field": "trades", "type": "quantitative", "label": "闭环交易" },
             { "field": "maxDrawdown", "type": "quantitative", "label": "最大回撤", "format": "percent" },
-            { "field": "targetAligned", "type": "text", "label": "目标与执行对齐" }
+            { "field": "targetAligned", "type": "text", "label": "后续语义审计" }
           ]
         }
       },
@@ -110,29 +110,29 @@
     "sources": [
       {
         "id": "v4_replay",
-        "label": "V4 canonical historical replay",
+        "label": "Retired V4 semantic-mismatch replay",
         "path": ".research-data/replays/historical-replay-v4-20260821T181600Z.json"
       },
       {
         "id": "version_comparison",
-        "label": "V3 and V4 canonical replay comparison",
+        "label": "Retired V3/V4 historical comparison",
         "path": "docs/reports/v4-profitability/source-notes.md"
       }
     ],
     "blocks": [
-      { "id": "title", "type": "markdown", "body": "# 墨衡 V4 执行对齐历史收益诊断" },
+      { "id": "title", "type": "markdown", "body": "# 墨衡 V4 已退役语义失配历史诊断\n\n> **RETIRED：V4 在已经对齐的确认收盘/下一开盘边界后又等待一根 K 线。以下旧数值只用于失配审计，不是 canonical、V6 对照或晋级证据。**" },
       {
         "id": "technical_summary",
         "type": "markdown",
         "sourceId": "v4_replay",
-        "body": "## 技术摘要\n\n- **V4 在已观察的历史开发集上转正。** 24 bps 往返成本后净收益为 **+12.01%**，48 bps 压力成本后为 **+0.60%**；172 笔闭环交易，盈利交易率 56.98%，最大回撤 8.18%。\n- **主要修复不是调参，而是训练目标与账本对齐。** 标签从旧的收盘价止盈止损结果，改为确认线收盘决策、下一根开盘成交、12 根后开盘退出，与回放结算一致。\n- **这不是未来盈利证明。** 固定策略是在同一历史经诊断后确定，开发历史已被观察；结果集中于部分资产和周期，必须继续做未来公共 Shadow，不能晋级订单链。"
+        "body": "## 技术摘要\n\n- **V4 旧账本在已观察历史上记录为正。** 24 bps 往返成本后为 **+12.01%**，48 bps 压力成本后为 **+0.60%**；172 笔闭环交易。\n- **后续审计否定了其执行对齐声明。** 特征时间戳已经位于确认收盘/下一开盘共同边界，V4 又施加一根延迟，所以上述交易与收益不是 V6 目标合同结果。\n- **本材料已退役。** 不得用于模型晋级、Shadow 计时、Demo/Live 决策，也不得与 V6 直接拼接。"
       },
       { "id": "headline_metrics", "type": "metric-strip", "cardIds": ["ordinary_net_card", "stress_net_card", "drawdown_card", "trades_card"] },
       {
         "id": "target_alignment_finding",
         "type": "markdown",
         "sourceId": "version_comparison",
-        "body": "## 目标对齐修复了 V3 的核心错配\n\nV3 的预测目标与实际退出方式不一致，普通成本后为 -1.84%，压力成本后为 -3.86%。V4 在相同冻结 cohort 上把标签、成交延迟、持有期和费用口径统一后，两种成本情景都转为正数。图中普通成本改善明显，但压力结果仅 +0.60%，说明策略仍对成本假设敏感。"
+        "body": "## 当时声称的对齐后来被证伪\n\nV3 的预测目标与实际退出方式不一致；V4 当时声称统一了标签、成交延迟、持有期和费用口径。后续逐时钟审计发现 V4 在已对齐边界后额外等待一根 K 线，因此图表只能比较两个已退役历史合同，不能说明 V6 收益改善。"
       },
       { "id": "version_cost_visual", "type": "chart", "chartId": "version_cost_chart" },
       {
@@ -163,7 +163,7 @@
       {
         "id": "limitations",
         "type": "markdown",
-        "body": "## 限制、不确定性与稳健性判断\n\n- **总体判断：可作为开发证据分享，但不可用于晋级。** 普通成本、压力成本、交易数、胜率和回撤门槛均通过。\n- **选择偏差仍在。** V4 策略是在同一 cohort 的诊断原型中确定，表格中的局部敏感性也来自同一已观察历史；没有新的封存样本。\n- **成本余量很薄。** 48 bps 压力净收益只有 +0.60%，小幅成交质量恶化即可抹去。\n- **成交模型不完整。** 历史 OHLCV 无订单簿、队列位置和真实账户费率；容量缩量只是保守近似。\n- **组合贡献集中。** 总收益依赖 XRP、DOGE 和少数 30 天周期，不能据此推断所有品种或未来市场状态持续有效。"
+        "body": "## 限制、不确定性与退役结论\n\n- **总体判断：只保留为语义失配审计材料。** 旧门槛通过状态已被后续时钟审计推翻。\n- **执行语义失配。** 额外一根延迟使交易、费用、回撤和收益均不能代表 V6 合同。\n- **选择偏差仍在。** 策略和局部敏感性均来自同一已观察历史，没有新的封存样本。\n- **成交模型不完整。** 历史 OHLCV 无订单簿、队列位置和真实账户费率。\n- **组合贡献集中。** 总收益依赖 XRP、DOGE 和少数周期，不能外推未来。"
       },
       {
         "id": "recommended_next_steps",
@@ -195,8 +195,8 @@
       "versionCostComparison": [
         { "version": "V3", "costScenario": "24 bps 普通", "netReturn": -0.018355488507282636, "trades": 36, "maxDrawdown": 0.054580379521292834, "targetAligned": "否" },
         { "version": "V3", "costScenario": "48 bps 压力", "netReturn": -0.03863816890319671, "trades": 23, "maxDrawdown": 0.0622893742175287, "targetAligned": "否" },
-        { "version": "V4", "costScenario": "24 bps 普通", "netReturn": 0.12005627052512424, "trades": 172, "maxDrawdown": 0.08177585844380866, "targetAligned": "是" },
-        { "version": "V4", "costScenario": "48 bps 压力", "netReturn": 0.006030410517849472, "trades": 123, "maxDrawdown": 0.0834595573325371, "targetAligned": "是" }
+        { "version": "V4", "costScenario": "24 bps 普通", "netReturn": 0.12005627052512424, "trades": 172, "maxDrawdown": 0.08177585844380866, "targetAligned": "失配；已退役" },
+        { "version": "V4", "costScenario": "48 bps 压力", "netReturn": 0.006030410517849472, "trades": 123, "maxDrawdown": 0.0834595573325371, "targetAligned": "失配；已退役" }
       ],
       "assetContribution": [
         { "instrument": "XRP-USDT", "netPnl": 879.19, "trades": 39, "netPnlShare": 0.73232 },
@@ -251,14 +251,14 @@
   "sources": [
     {
       "id": "v4_replay",
-      "label": "V4 canonical historical replay",
+        "label": "Retired V4 semantic-mismatch replay",
       "path": ".research-data/replays/historical-replay-v4-20260821T181600Z.json",
       "query": {
         "engine": "duckdb",
         "language": "sql",
         "sql": "SELECT result.ordinary.netReturn AS ordinary_net_return, result.ordinary.grossPnlReturn AS ordinary_gross_return, result.ordinary.maxDrawdown AS max_drawdown, result.ordinary.trades AS trades, result.ordinary.profitableTradeRate AS profitable_trade_rate, result.stress48Bps.netReturn AS stress_net_return, result.ordinary.netPnlByInstrument AS net_pnl_by_instrument, result.policySensitivity AS policy_sensitivity FROM read_json_auto('.research-data/replays/historical-replay-v4-20260821T181600Z.json')",
         "query": "json.loads(Path('.research-data/replays/historical-replay-v4-20260821T181600Z.json').read_text(encoding='utf-8'))",
-        "description": "Reads the immutable canonical V4 replay report and aggregates its ledger, instrument, episode, and policy-sensitivity fields.",
+        "description": "Reads the immutable retired V4 replay solely to audit its superseded timing semantics and historical ledger fields.",
         "executed_at": "2026-08-21T18:19:42.110Z",
         "tables_used": [".research-data/replays/historical-replay-v4-20260821T181600Z.json"],
         "filters": ["decision = research_only", "promotable = false", "shadowDaysCredited = 0", "ordinary round-trip cost = 24 bps", "stress round-trip cost = 48 bps"],
@@ -267,18 +267,18 @@
     },
     {
       "id": "version_comparison",
-      "label": "V3 and V4 canonical replay comparison",
+      "label": "Retired V3/V4 historical comparison",
       "path": "docs/reports/v4-profitability/source-notes.md",
       "query": {
         "engine": "duckdb",
         "language": "sql",
         "sql": "WITH v3 AS (SELECT 'V3' AS version, result FROM read_json_auto('.research-data/replays/historical-replay-v3-20260821T171933Z.json')), v4 AS (SELECT 'V4' AS version, result FROM read_json_auto('.research-data/replays/historical-replay-v4-20260821T181600Z.json')) SELECT version, result.ordinary.netReturn AS ordinary_net_return, result.stress48Bps.netReturn AS stress_net_return, result.ordinary.maxDrawdown AS max_drawdown FROM v3 UNION ALL SELECT version, result.ordinary.netReturn, result.stress48Bps.netReturn, result.ordinary.maxDrawdown FROM v4",
         "query": "reports = [json.loads(Path(path).read_text(encoding='utf-8')) for path in ['.research-data/replays/historical-replay-v3-20260821T171933Z.json', '.research-data/replays/historical-replay-v4-20260821T181600Z.json']]",
-        "description": "Compares V3 and V4 canonical reports from the same frozen multi-asset cohort.",
+        "description": "Compares two retired historical contracts from the same frozen cohort; neither is a V6 baseline.",
         "executed_at": "2026-08-21T18:21:00.000Z",
         "tables_used": [".research-data/replays/historical-replay-v3-20260821T171933Z.json", ".research-data/replays/historical-replay-v4-20260821T181600Z.json"],
         "filters": ["same cohortSha256 = 6d7c319f462afdace7400053e91110b863f14941616bc4899be05e2d84f0f98c", "ordinary and 48 bps stress ledgers only"],
-        "metric_definitions": ["netReturn = finalCash / startingCash - 1", "targetAligned = report leakageAudit.targetExecutionAligned"]
+        "metric_definitions": ["netReturn = finalCash / startingCash - 1", "targetAligned = later semantic audit outcome; the retired report's original flag is not trusted"]
       }
     }
   ]

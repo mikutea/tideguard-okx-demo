@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from okx_demo_lab.ml.strategy import canonical_json, sha256_hex
-from okx_demo_lab.research_monitor import ResearchMonitor
+from okx_demo_lab.research_monitor import (
+    MAX_JSON_BYTES,
+    MAX_REPLAY_JSON_BYTES,
+    ResearchMonitor,
+)
 
 
 def _write_json(path: Path, value: dict[str, object]) -> None:
@@ -348,7 +355,288 @@ def _replay_report(cohort_id: str) -> dict[str, object]:
     return {**body, "reportSha256": sha256_hex(canonical_json(body))}
 
 
-def test_monitor_surfaces_verified_historical_replay_without_trading_capability(
+_CHECKPOINT_VALUATION_BASIS = (
+    "current_bar_open_at_checkpoint_boundary"
+)
+_FIRST_REPLAY = datetime(2023, 1, 1, tzinfo=timezone.utc)
+_REPLAY_ROWS = 30 * 288
+_LAST_REPLAY = _FIRST_REPLAY + timedelta(minutes=5 * (_REPLAY_ROWS - 1))
+
+
+def _iso_z(value: datetime) -> str:
+    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _break_even_gross_return_bps(slippage_bps_per_side: float) -> float:
+    fee = 8.0 / 10_000.0
+    slippage = slippage_bps_per_side / 10_000.0
+    multiplier = ((1.0 + slippage) * (1.0 + fee)) / (
+        (1.0 - slippage) * (1.0 - fee)
+    )
+    return (multiplier - 1.0) * 10_000.0
+
+
+def _v6_policy(round_trip_cost_bps: float) -> dict[str, object]:
+    return {
+        "edgeBufferBps": 72.0,
+        "minEntrySpacingBars": 12,
+        "requiredGrossReturnBps": round_trip_cost_bps + 72.0,
+    }
+
+
+def _v6_broker(
+    *, round_trip_cost_bps: float, slippage_bps_per_side: float
+) -> dict[str, object]:
+    return {
+        "allocationFraction": 0.25,
+        "breakEvenGrossReturnBps": _break_even_gross_return_bps(
+            slippage_bps_per_side
+        ),
+        "capacityHandling": "clip",
+        "checkpointStrideBars": 288,
+        "executionLabelHorizonBars": 12,
+        "feeBpsPerSide": 8.0,
+        "holdingPeriodBars": 12,
+        "latencyBars": 0,
+        "maxQuoteVolumeParticipation": 0.005,
+        "minimumNotional": 10.0,
+        "roundTripCostBps": round_trip_cost_bps,
+        "slippageBpsPerSide": slippage_bps_per_side,
+        "startingCash": 10_000.0,
+    }
+
+
+def _v6_leakage_guard() -> dict[str, object]:
+    return {
+        "causalEpisodeBinding": True,
+        "checkpointValuationBasis": _CHECKPOINT_VALUATION_BASIS,
+        "decisionToFillBars": 0,
+        "executionCoordinate": "decision_rows",
+        "nextDecisionRowFill": False,
+        "predictionRowsAvailableBeforeDecision": True,
+        "sameDecisionRowFill": True,
+    }
+
+
+def _v6_checkpoints() -> list[dict[str, object]]:
+    indices = list(range(0, _REPLAY_ROWS, 288))
+    if indices[-1] != _REPLAY_ROWS - 1:
+        indices.append(_REPLAY_ROWS - 1)
+    return [
+        {
+            "at": _iso_z(_FIRST_REPLAY + timedelta(minutes=5 * index)),
+            "cash": 10_000.0,
+            "drawdown": 0.0,
+            "equity": 10_000.0,
+            "peakEquity": 10_000.0,
+            "positionInstrument": None,
+            "positionMarketValue": 0.0,
+        }
+        for index in indices
+    ]
+
+
+def _v6_drawdown_witness() -> dict[str, object]:
+    first_at = _iso_z(_FIRST_REPLAY)
+    return {
+        "drawdown": 0.0,
+        "peakAt": first_at,
+        "peakEquity": 10_000.0,
+        "peakSource": "pre_replay_starting_cash",
+        "troughAt": first_at,
+        "troughEquity": 10_000.0,
+    }
+
+
+def _v6_ledger(
+    *,
+    round_trip_cost_bps: float,
+    slippage_bps_per_side: float,
+    trade_value: object,
+    failures: list[str] | None = None,
+    development_gate_passed: bool | None = None,
+) -> dict[str, object]:
+    ledger: dict[str, object] = {
+        "broker": _v6_broker(
+            round_trip_cost_bps=round_trip_cost_bps,
+            slippage_bps_per_side=slippage_bps_per_side,
+        ),
+        "cashBarRate": 1.0,
+        "checkpoints": _v6_checkpoints(),
+        "finalCash": 10_000.0,
+        "grossPnlReturn": 0.0,
+        "leakageGuard": _v6_leakage_guard(),
+        "maxDrawdown": 0.0,
+        "maxDrawdownWitness": _v6_drawdown_witness(),
+        "netReturn": 0.0,
+        "ordersClipped": 0,
+        "ordersRejected": 0,
+        "ordersSubmitted": 0,
+        "policy": _v6_policy(round_trip_cost_bps),
+        "profitableTradeRate": 0.0,
+        "simulatedDays": 30.0,
+        "timeRows": _REPLAY_ROWS,
+        "totalEstimatedSlippageCost": 0.0,
+        "totalFees": 0.0,
+        "trades": trade_value,
+        "tradesPerDay": 0.0,
+        "turnoverMultiple": 0.0,
+    }
+    if failures is not None:
+        ledger["failures"] = failures
+    if development_gate_passed is not None:
+        ledger["developmentGatePassed"] = development_gate_passed
+    return ledger
+
+
+def _reseal(report: dict[str, object]) -> dict[str, object]:
+    report.pop("reportSha256", None)
+    report["reportSha256"] = sha256_hex(canonical_json(report))
+    return report
+
+
+def _v6_replay_report(cohort_id: str) -> dict[str, object]:
+    ordinary_failures = [
+        "trades_insufficient",
+        "profitable_trade_rate_below_gate",
+        "net_return_below_gate",
+    ]
+    slice_failures = [
+        "execution_slice_trades_insufficient",
+        "execution_slice_net_return_not_positive",
+        "execution_slice_stress_return_not_positive",
+    ]
+    ordinary = _v6_ledger(
+        round_trip_cost_bps=24.0,
+        slippage_bps_per_side=4.0,
+        trade_value=[],
+        failures=ordinary_failures,
+        development_gate_passed=False,
+    )
+    stress = _v6_ledger(
+        round_trip_cost_bps=48.0,
+        slippage_bps_per_side=16.0,
+        trade_value=0,
+        failures=[],
+        development_gate_passed=True,
+    )
+    btc_ordinary = _v6_ledger(
+        round_trip_cost_bps=24.0,
+        slippage_bps_per_side=4.0,
+        trade_value=0,
+    )
+    btc_stress = _v6_ledger(
+        round_trip_cost_bps=48.0,
+        slippage_bps_per_side=16.0,
+        trade_value=0,
+    )
+    report: dict[str, object] = {
+        "completedAt": "2026-08-22T01:00:00.000Z",
+        "dataset": {
+            "capacityVolumeSource": "confirmed_feature_source_bar",
+            "cohortId": cohort_id,
+            "firstReplayAt": _iso_z(_FIRST_REPLAY),
+            "instruments": ["BTC-USDT", "ETH-USDT"],
+            "lastReplayAt": _iso_z(_LAST_REPLAY),
+            "replayTimeRows": _REPLAY_ROWS,
+        },
+        "decision": "research_only",
+        "execution": {
+            "checkpointValuationBasis": _CHECKPOINT_VALUATION_BASIS,
+            "decisionToFillLatencyBars": 0,
+            "engineSchemaVersion": "moheng.historical-replay.v3",
+            "executionAllowlistChanged": False,
+            "historicalReplayOnly": True,
+            "orderCapability": False,
+            "privateApi": False,
+            "publicDataOnly": True,
+        },
+        "leakageAudit": {
+            "checkpointValuationBasis": _CHECKPOINT_VALUATION_BASIS,
+            "decisionTimestampEqualsEntryTimestamp": True,
+            "decisionToFillBars": 0,
+            "entryBarVolumeUsedExPost": False,
+            "featureSourceCloseToEntryBars": 0,
+            "instantaneousDecisionFillAssumption": True,
+            "nextCandleAfterFeatureSource": True,
+            "sameSourceBarFillAllowed": False,
+            "sameTimestampFillAllowed": True,
+            "targetExecutionAligned": True,
+        },
+        "model": {
+            "calibrationImproved": True,
+            "family": "hist_gradient_boosting",
+            "targetContract": {
+                "decisionAt": "confirmed_bar_close_next_bar_open_boundary",
+                "entryAt": "next_bar_open_same_timestamp",
+                "exitAt": "entry_plus_12_bars_open",
+                "labelHorizonBars": 12,
+                "predictionUnit": "gross_return",
+            },
+        },
+        "episodes": [
+            {
+                "assetRows": 2,
+                "availableAt": "2022-12-31T23:55:00.000Z",
+                "calibrationRows": 25_920,
+                "calibrationStartAt": "2022-12-01T00:00:00.000Z",
+                "calibrationStopAt": "2022-12-31T22:50:00.000Z",
+                "diagnostics": {
+                    "calibratedBrier": 0.21,
+                    "rawBrier": 0.31,
+                },
+                "episode": 0,
+                "episodeId": "replay_episode_test",
+                "fitRows": 289_000,
+                "fitStartAt": "2022-01-01T00:00:00.000Z",
+                "fitStopAt": "2022-11-30T22:50:00.000Z",
+                "labelCompleteAt": "2022-12-31T23:50:00.000Z",
+                "replayRows": _REPLAY_ROWS,
+                "replayStartAt": _iso_z(_FIRST_REPLAY),
+                "replayStopAt": _iso_z(_LAST_REPLAY),
+                "trainingSeconds": 3.5,
+            }
+        ],
+        "promotable": False,
+        "promotionBlockers": [
+            "historical_replay_development_only",
+            "requires_90_day_forward_public_shadow",
+        ],
+        "protocol": {
+            "developmentHistoryAlreadyObserved": True,
+            "episodeCount": 1,
+            "executionLabelHorizonBars": 12,
+            "retrainEveryDays": 30.0,
+        },
+        "replayId": "hreplay_" + "a" * 24,
+        "result": {
+            "chosenPolicy": _v6_policy(24.0),
+            "decision": "research_only",
+            "developmentGatePassed": False,
+            "executionSlice": {
+                "decision": "research_only",
+                "developmentGatePassed": False,
+                "failures": slice_failures,
+                "instrument": "BTC-USDT",
+                "ordinary": btc_ordinary,
+                "stress48Bps": btc_stress,
+            },
+            "historicalSelectionBias": {"resultMayBeOptimistic": True},
+            "ordinary": ordinary,
+            "shadowDaysCredited": 0,
+            "stress48Bps": stress,
+        },
+        "schemaVersion": "moheng.historical-replay-report.v4",
+        "shadowDaysCredited": 0,
+        "timing": {
+            "compressionMultiple": 9_000.0,
+            "totalWallSeconds": 8.0,
+        },
+    }
+    return _reseal(report)
+
+
+def test_monitor_retires_v1_historical_replay_even_with_a_valid_hash(
     tmp_path,
 ) -> None:
     root = tmp_path / ".research-data"
@@ -362,7 +650,10 @@ def test_monitor_surfaces_verified_historical_replay_without_trading_capability(
     status = ResearchMonitor(root).status()
 
     replay = status["replay"]
-    assert replay["valid"] is True
+    assert replay["valid"] is False
+    assert replay["monitorContractValid"] is False
+    assert replay["retiredSemanticMismatch"] is True
+    assert replay["executionSemantics"] == "retired_legacy_semantics"
     assert replay["decision"] == "research_only"
     assert replay["shadowDaysCredited"] == 0
     assert replay["episodeCount"] == 28
@@ -373,16 +664,18 @@ def test_monitor_surfaces_verified_historical_replay_without_trading_capability(
     assert replay["finalCash"] == 9_900.0
     assert replay["tradeCount"] == 1
     assert replay["checkpoints"][0]["equity"] == 10_000.0
+    assert "historical_replay_integrity_unverified" in status["blockers"]
+    assert "historical_replay_semantics_retired" in status["blockers"]
     assert status["safety"]["orderCapability"] is False
     assert status["safety"]["privateApi"] is False
 
 
-def test_monitor_rejects_tampered_historical_replay(tmp_path) -> None:
+def test_monitor_rejects_unsealed_v6_hash_tampering(tmp_path) -> None:
     root = tmp_path / ".research-data"
     root.mkdir()
-    report = _replay_report("cohort_" + "a" * 24)
-    report["shadowDaysCredited"] = 90
-    _write_json(root / "replays" / "historical-replay-v3-test.json", report)
+    report = _v6_replay_report("cohort_" + "a" * 24)
+    report["timing"]["totalWallSeconds"] = 9.0
+    _write_json(root / "replays" / "historical-replay-v6-test.json", report)
 
     status = ResearchMonitor(root).status()
 
@@ -390,7 +683,7 @@ def test_monitor_rejects_tampered_historical_replay(tmp_path) -> None:
     assert "historical_replay_integrity_unverified" in status["blockers"]
 
 
-def test_monitor_surfaces_execution_aligned_v4_replay(tmp_path) -> None:
+def test_monitor_retires_v2_execution_aligned_replay(tmp_path) -> None:
     root = tmp_path / ".research-data"
     root.mkdir()
     path = root / "replays" / "historical-replay-v4-test.json"
@@ -426,7 +719,9 @@ def test_monitor_surfaces_execution_aligned_v4_replay(tmp_path) -> None:
 
     replay = ResearchMonitor(root).status()["replay"]
 
-    assert replay["valid"] is True
+    assert replay["valid"] is False
+    assert replay["monitorContractValid"] is False
+    assert replay["retiredSemanticMismatch"] is True
     assert replay["targetExecutionAligned"] is True
     assert replay["capacityHandling"] == "clip"
     assert replay["ordersClipped"] == 4
@@ -440,7 +735,7 @@ def test_monitor_surfaces_execution_aligned_v4_replay(tmp_path) -> None:
     assert ResearchMonitor(root).status()["replay"]["valid"] is False
 
 
-def test_monitor_surfaces_v5_btc_execution_slice(tmp_path) -> None:
+def test_monitor_retires_v3_btc_execution_slice(tmp_path) -> None:
     root = tmp_path / ".research-data"
     root.mkdir()
     path = root / "replays" / "historical-replay-v5-test.json"
@@ -479,7 +774,9 @@ def test_monitor_surfaces_v5_btc_execution_slice(tmp_path) -> None:
 
     replay = ResearchMonitor(root).status()["replay"]
 
-    assert replay["valid"] is True
+    assert replay["valid"] is False
+    assert replay["monitorContractValid"] is False
+    assert replay["retiredSemanticMismatch"] is True
     assert replay["executionSlice"] == {
         "developmentGatePassed": False,
         "failures": ["execution_slice_trades_insufficient"],
@@ -489,3 +786,234 @@ def test_monitor_surfaces_v5_btc_execution_slice(tmp_path) -> None:
         "stressNetReturn": 0.001,
         "trades": 4,
     }
+
+
+def test_monitor_validates_complete_v6_corrected_execution_contract(
+    tmp_path,
+) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    path = root / "replays" / "historical-replay-v6-test.json"
+    report = _v6_replay_report("cohort_" + "d" * 24)
+    _write_json(path, report)
+
+    status = ResearchMonitor(root).status()
+    replay = status["replay"]
+
+    assert replay["valid"] is True
+    assert replay["monitorContractValid"] is True
+    assert replay["independentVerificationRequired"] is True
+    assert replay["executionSemantics"] == "corrected_next_open_boundary"
+    assert replay["retiredSemanticMismatch"] is False
+    assert replay["episodeCount"] == 1
+    assert replay["ordinaryCostBps"] == 24.0
+    assert replay["tradeCount"] == 0
+    assert len(replay["checkpoints"]) == 31
+    assert replay["maxDrawdownVerification"] == {
+        "exactMaxDrawdownRecomputed": True,
+        "fullBarSourceReplayPerformed": False,
+        "method": "embedded_peak_trough_witness_bound_to_exact_checkpoints",
+        "reportedMaxDrawdown": 0.0,
+    }
+    assert "historical_replay_integrity_unverified" not in status["blockers"]
+    assert "historical_replay_semantics_retired" not in status["blockers"]
+
+    ledgers = [
+        report["result"]["ordinary"],
+        report["result"]["stress48Bps"],
+        report["result"]["executionSlice"]["ordinary"],
+        report["result"]["executionSlice"]["stress48Bps"],
+    ]
+    assert all(len(ledger["checkpoints"]) == 31 for ledger in ledgers)
+    assert all("maxDrawdownWitness" in ledger for ledger in ledgers)
+
+
+def test_monitor_prefers_v6_over_a_newer_legacy_file(tmp_path) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    _write_json(
+        root / "replays" / "historical-replay-v6-valid.json",
+        _v6_replay_report("cohort_" + "d" * 24),
+    )
+    _write_json(
+        root / "replays" / "historical-replay-v5-newer.json",
+        _replay_report("cohort_" + "e" * 24),
+    )
+
+    replay = ResearchMonitor(root).status()["replay"]
+
+    assert replay["schemaVersion"] == "moheng.historical-replay-report.v4"
+    assert replay["valid"] is True
+
+
+def test_monitor_rejects_resealed_main_stress_leakage_tamper(tmp_path) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    report = _v6_replay_report("cohort_" + "f" * 24)
+    report["result"]["stress48Bps"]["leakageGuard"][
+        "causalEpisodeBinding"
+    ] = False
+    _write_json(
+        root / "replays" / "historical-replay-v6-tampered.json",
+        _reseal(report),
+    )
+
+    replay = ResearchMonitor(root).status()["replay"]
+
+    assert replay["valid"] is False
+    assert replay["monitorContractValid"] is False
+
+
+@pytest.mark.parametrize("gate", ["ordinary", "stress", "execution_slice"])
+def test_monitor_recomputes_resealed_v6_gates(tmp_path, gate: str) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    report = _v6_replay_report("cohort_" + "1" * 24)
+    if gate == "ordinary":
+        report["result"]["ordinary"]["failures"] = []
+        report["result"]["ordinary"]["developmentGatePassed"] = True
+    elif gate == "stress":
+        report["result"]["stress48Bps"]["failures"] = [
+            "stress_net_return_below_zero"
+        ]
+        report["result"]["stress48Bps"]["developmentGatePassed"] = False
+    else:
+        report["result"]["executionSlice"]["failures"] = []
+        report["result"]["executionSlice"]["developmentGatePassed"] = True
+    _write_json(
+        root / "replays" / "historical-replay-v6-gate.json",
+        _reseal(report),
+    )
+
+    replay = ResearchMonitor(root).status()["replay"]
+
+    assert replay["valid"] is False
+    assert replay["monitorContractValid"] is False
+
+
+@pytest.mark.parametrize(
+    ("component", "field", "value"),
+    [
+        ("broker", "latencyBars", False),
+        ("broker", "allocationFraction", 0.5),
+        ("broker", "breakEvenGrossReturnBps", 24.0),
+        ("broker", "checkpointStrideBars", True),
+        ("policy", "edgeBufferBps", 71.0),
+        ("policy", "minEntrySpacingBars", False),
+    ],
+)
+def test_monitor_rejects_resealed_v6_policy_and_broker_tampering(
+    tmp_path,
+    component: str,
+    field: str,
+    value: object,
+) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    report = _v6_replay_report("cohort_" + "2" * 24)
+    report["result"]["ordinary"][component][field] = value
+    _write_json(
+        root / "replays" / "historical-replay-v6-contract.json",
+        _reseal(report),
+    )
+
+    replay = ResearchMonitor(root).status()["replay"]
+
+    assert replay["valid"] is False
+    assert replay["monitorContractValid"] is False
+
+
+def test_monitor_rejects_zeroed_resealed_max_drawdown(tmp_path) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    path = root / "replays" / "historical-replay-v6-drawdown.json"
+    report = _v6_replay_report("cohort_" + "3" * 24)
+    ordinary = report["result"]["ordinary"]
+    trough = ordinary["checkpoints"][1]
+    trough.update(
+        {
+            "cash": 9_900.0,
+            "drawdown": 0.01,
+            "equity": 9_900.0,
+        }
+    )
+    ordinary["maxDrawdown"] = 0.01
+    ordinary["maxDrawdownWitness"].update(
+        {
+            "drawdown": 0.01,
+            "troughAt": trough["at"],
+            "troughEquity": 9_900.0,
+        }
+    )
+    _write_json(path, _reseal(report))
+    assert ResearchMonitor(root).status()["replay"]["valid"] is True
+
+    ordinary["maxDrawdown"] = 0.0
+    _write_json(path, _reseal(report))
+
+    replay = ResearchMonitor(root).status()["replay"]
+    assert replay["valid"] is False
+    assert replay["maxDrawdownVerification"][
+        "exactMaxDrawdownRecomputed"
+    ] is False
+
+
+@pytest.mark.parametrize("tamper", ["checkpoint", "witness"])
+def test_monitor_rejects_resealed_drawdown_binding_tamper(
+    tmp_path, tamper: str
+) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    report = _v6_replay_report("cohort_" + "4" * 24)
+    ordinary = report["result"]["ordinary"]
+    checkpoint = ordinary["checkpoints"][1]
+    if tamper == "checkpoint":
+        checkpoint.update(
+            {
+                "cash": 9_999.0,
+                "drawdown": 0.0001,
+                "equity": 9_999.0,
+            }
+        )
+    else:
+        ordinary["maxDrawdown"] = 0.0001
+        ordinary["maxDrawdownWitness"].update(
+            {
+                "drawdown": 0.0001,
+                "troughAt": checkpoint["at"],
+                "troughEquity": 9_999.0,
+            }
+        )
+    _write_json(
+        root / "replays" / "historical-replay-v6-drawdown-tamper.json",
+        _reseal(report),
+    )
+
+    replay = ResearchMonitor(root).status()["replay"]
+
+    assert replay["valid"] is False
+    assert replay["monitorContractValid"] is False
+
+
+def test_replay_size_limit_accepts_six_mib_and_rejects_over_32_mib(
+    tmp_path,
+) -> None:
+    assert MAX_JSON_BYTES == 1_000_000
+    assert MAX_REPLAY_JSON_BYTES == 32 * 1024 * 1024
+
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    path = root / "replays" / "historical-replay-v6-size.json"
+    report = _v6_replay_report("cohort_" + "5" * 24)
+    report["padding"] = "x" * (6 * 1024 * 1024)
+    _write_json(path, _reseal(report))
+
+    assert 5 * 1024 * 1024 < path.stat().st_size <= MAX_REPLAY_JSON_BYTES
+    assert ResearchMonitor(root).status()["replay"]["valid"] is True
+
+    oversized = _v6_replay_report("cohort_" + "6" * 24)
+    oversized["padding"] = "x" * MAX_REPLAY_JSON_BYTES
+    _write_json(path, _reseal(oversized))
+
+    assert path.stat().st_size > MAX_REPLAY_JSON_BYTES
+    assert ResearchMonitor(root).status()["replay"] is None
