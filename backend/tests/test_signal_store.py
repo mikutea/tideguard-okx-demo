@@ -11,6 +11,7 @@ from okx_demo_lab.ml.alternative_data import (
     SourcePolicy,
 )
 from okx_demo_lab.ml.signal_store import SignalStore, SignalStoreError
+from okx_demo_lab.sqlite_runtime import is_remote_storage
 
 
 NOW = datetime(2026, 8, 21, 1, 0, tzinfo=timezone.utc)
@@ -133,7 +134,8 @@ def test_append_query_snapshot_and_quality_report_are_content_addressed(tmp_path
     assert quality["storedScores"] == 1
     assert quality["unresolvedConflicts"] == 0
     with sqlite3.connect(store.path) as db:
-        assert db.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
+        expected_journal = "delete" if is_remote_storage(store.path) else "wal"
+        assert db.execute("PRAGMA journal_mode").fetchone()[0].lower() == expected_journal
         assert db.execute("PRAGMA synchronous").fetchone()[0] == 2
         policy = db.execute(
             "SELECT policy_sha256, license_id FROM source_policies"
