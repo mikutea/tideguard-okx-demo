@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets as token_secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -8,13 +9,29 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .audit import AuditStore
-from .config import APP_NAME, OKX_BASE_URL, POLICY, SIMULATED_HEADER, app_data_dir
+from .config import (
+    APP_NAME,
+    APP_VERSION,
+    ENVIRONMENT_SELECTOR_FILE,
+    OKX_BASE_URL,
+    PUBLIC_APP_NAME,
+    SIMULATED_HEADER,
+    app_data_dir,
+)
+from .environment import (
+    EnvironmentConfirmRequest,
+    EnvironmentSelectionStore,
+    EnvironmentSwitchError,
+    EnvironmentTargetRequest,
+    RuntimeEnvironment,
+)
 from .ml.execution import AutomationDenied
 from .ml.autonomy import AutonomyError, AutonomyStore, PositionStateError
 from .ml.long_run import LongRunCoordinator, LongRunError
@@ -33,8 +50,13 @@ from .models import (
     ResetKillRequest,
 )
 from .okx_client import OkxClient, OkxClientError
+from .research_monitor import ResearchMonitor
 from .secrets import credentials_configured
-from .service import TradingService
+from .service import (
+    EnvironmentSwitchService,
+    TradingService,
+    validate_profile_config,
+)
 from .state import SafetyController, SafetyError
 
 
@@ -157,13 +179,35 @@ def recover_autonomy_position_before_loop(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    data_dir = app_data_dir()
+    startup_logger = logging.getLogger("tideguard.startup")
+    startup_logger.info("Startup stage: resolve_environment")
+    data_root = app_data_dir()
+    runtime_environment = RuntimeEnvironment(
+        EnvironmentSelectionStore(data_root / ENVIRONMENT_SELECTOR_FILE)
+    )
+    profile = runtime_environment.active_profile
+    data_dir = profile.runtime_data_dir(data_root)
+    startup_logger.info("Startup stage: audit_store")
     store = AuditStore(data_dir / "state.sqlite3")
     if not store.verify_chain():
         store.engage_kill_latch()
-    client = OkxClient()
-    safety = SafetyController(store)
-    service = TradingService(client, store, safety)
+    if not runtime_environment.status()["selectorValid"]:
+        store.engage_kill_latch()
+    if profile.name == "live" and not store.get_kill_state()[0]:
+        store.engage_kill_latch()
+        store.append(
+            "environment.live_startup_locked",
+            {"environment": "live", "independentAuthorizationRequired": True},
+            actor="system",
+        )
+    client = OkxClient(profile=profile)
+    safety = SafetyController(store, profile)
+    service = TradingService(
+        client,
+        store,
+        safety,
+        execution_environment_guard=runtime_environment.assert_execution_allowed,
+    )
     unresolved = store.recover_unresolved_intents()
     if unresolved:
         safety.acknowledge_persisted_kill(
@@ -177,7 +221,11 @@ async def lifespan(app: FastAPI):
     app.state.client = client
     app.state.safety = safety
     app.state.service = service
+    app.state.environment_runtime = runtime_environment
+    app.state.data_root = data_root
+    startup_logger.info("Startup stage: ml_registry")
     ml = MLCoordinator(data_dir=data_dir, client=client, service=service, store=store)
+    startup_logger.info("Startup stage: autonomy_store")
     autonomy = AutonomyStore(data_dir / "autonomy.sqlite3")
     recovered_training_runs = autonomy.recover_running_training(
         now=datetime.now(timezone.utc)
@@ -188,13 +236,16 @@ async def lifespan(app: FastAPI):
             {"count": recovered_training_runs},
             actor="system",
         )
+    startup_logger.info("Startup stage: market_data_store")
     long_run = LongRunCoordinator(
         client=client,
         service=service,
         audit=store,
         registry=ml.registry,
         autonomy=autonomy,
+        market_data_path=data_root / "market-data.sqlite3",
     )
+    startup_logger.info("Startup stage: recovery")
     try:
         autonomy_recovery_reason = recover_autonomy_position_before_loop(
             autonomy, store, long_run
@@ -210,12 +261,34 @@ async def lifespan(app: FastAPI):
     app.state.ml = ml
     app.state.autonomy = autonomy
     app.state.long_run = long_run
+    app.state.research_monitor = ResearchMonitor()
+
+    async def stop_legacy_automation(reason: str) -> dict[str, Any]:
+        return await ml.stop_automation(
+            reason=reason,
+            actor="user",
+            emergency=False,
+        )
+
+    app.state.environment_switch = EnvironmentSwitchService(
+        runtime=runtime_environment,
+        data_root=data_root,
+        trading=service,
+        audit=store,
+        autonomy=autonomy,
+        stop_legacy_automation=stop_legacy_automation,
+    )
     app.state.csrf_token = token_secrets.token_urlsafe(32)
     app.state.deadman_task = None
     app.state.ml_task = None
     store.append(
         "system.started",
-        {"environment": "demo", "bind": "127.0.0.1", "armed": False},
+        {
+            "environment": profile.name,
+            "bind": "127.0.0.1",
+            "armed": False,
+            "selectorValid": runtime_environment.status()["selectorValid"],
+        },
     )
 
     async def deadman_loop() -> None:
@@ -240,6 +313,7 @@ async def lifespan(app: FastAPI):
 
     app.state.deadman_task = asyncio.create_task(deadman_loop())
     app.state.ml_task = asyncio.create_task(long_run.run())
+    startup_logger.info("Startup stage: ready")
     try:
         yield
     finally:
@@ -264,8 +338,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Tideguard OKX Demo API",
-    version="0.3.0",
+    title=f"{PUBLIC_APP_NAME} OKX Local API",
+    version=APP_VERSION,
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -300,25 +374,30 @@ def service(request: Request) -> TradingService:
 
 @app.get("/api/v1/system/status")
 async def system_status(request: Request) -> dict[str, Any]:
+    environment_status = request.app.state.environment_switch.status()
+    policy = service(request).policy
+    profile = request.app.state.environment_runtime.active_profile
     return {
         "app": APP_NAME,
-        "version": "0.3.0",
-        "environment": "OKX 模拟盘",
-        "demoHeader": SIMULATED_HEADER,
+        "version": APP_VERSION,
+        "environment": profile.display_name,
+        "environmentProfile": environment_status,
+        "demoHeader": SIMULATED_HEADER if profile.simulated_trading else None,
         "baseUrl": OKX_BASE_URL,
         "bind": "127.0.0.1",
-        "credentialConfigured": credentials_configured(),
+        "credentialConfigured": environment_status["credentialConfigured"],
         "credentialStore": "Windows Credential Manager",
         "safety": request.app.state.safety.status(),
         "auditChainValid": request.app.state.store.verify_chain(),
         "csrfToken": request.app.state.csrf_token,
         "policy": {
-            "version": POLICY.policy_version,
-            "maxOrderNotionalUsdt": str(POLICY.max_order_notional_usdt),
-            "maxOrderEquityFraction": str(POLICY.max_order_equity_fraction),
-            "maxPriceDeviation": str(POLICY.max_price_deviation),
-            "maxOpenOrders": POLICY.max_open_orders,
-            "staleMarketSeconds": POLICY.stale_market_seconds,
+            "version": policy.policy_version,
+            "maxOrderNotionalUsdt": str(policy.max_order_notional_usdt),
+            "maxOrderEquityFraction": str(policy.max_order_equity_fraction),
+            "maxPriceDeviation": str(policy.max_price_deviation),
+            "maxOpenOrders": policy.max_open_orders,
+            "staleMarketSeconds": policy.stale_market_seconds,
+            "automationArmTtlSeconds": policy.automation_arm_ttl_seconds,
         },
     }
 
@@ -326,17 +405,99 @@ async def system_status(request: Request) -> dict[str, Any]:
 @app.post("/api/v1/connection/test")
 async def connection_test(request: Request) -> dict[str, Any]:
     client: OkxClient = request.app.state.client
+    profile = request.app.state.environment_runtime.active_profile
     try:
         public_time = await client.public_get("/api/v5/public/time")
-        private_config = await client.get_account_config() if credentials_configured() else []
+        configured = (
+            credentials_configured()
+            if profile.name == "demo"
+            else credentials_configured(profile)
+        )
+        if configured:
+            fingerprint = client.current_credential_fingerprint()
+            private_config = await client.get_account_config(
+                expected_credential_fingerprint=fingerprint
+            )
+        else:
+            private_config = []
+        private_reachable = bool(private_config)
+        policy_valid = False
+        policy_reason: str | None = None
+        if private_reachable:
+            try:
+                validate_profile_config(profile, private_config)
+                policy_valid = True
+            except EnvironmentSwitchError as exc:
+                policy_reason = str(exc)
+        else:
+            policy_reason = "当前环境未配置凭证或账户配置不可达"
         request.app.state.store.append(
             "connection.tested",
-            {"public": bool(public_time), "private": bool(private_config), "environment": "demo"},
+            {
+                "public": bool(public_time),
+                "privateReachable": private_reachable,
+                "policyValid": policy_valid,
+                "environment": profile.name,
+            },
             actor="user",
         )
-        return {"public": bool(public_time), "private": bool(private_config), "environment": "demo"}
+        return {
+            "public": bool(public_time),
+            # Keep ``private`` for older clients while exposing the policy result
+            # separately. Reachability must never be presented as authorization.
+            "private": private_reachable,
+            "privateReachable": private_reachable,
+            "policyValid": policy_valid,
+            "policyReason": policy_reason,
+            "environment": profile.name,
+        }
     except OkxClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="OKX 网络连接失败，请检查本机网络后重试",
+        ) from exc
+
+
+@app.get("/api/v1/environment/status")
+async def environment_status(request: Request) -> dict[str, Any]:
+    return request.app.state.environment_switch.status()
+
+
+@app.post("/api/v1/environment/preflight")
+async def environment_preflight(
+    request: Request, body: EnvironmentTargetRequest
+) -> dict[str, Any]:
+    try:
+        return await request.app.state.environment_switch.preflight(body.target)
+    except EnvironmentSwitchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/environment/challenge")
+async def environment_challenge(
+    request: Request, body: EnvironmentTargetRequest
+) -> dict[str, Any]:
+    try:
+        return await request.app.state.environment_switch.challenge(body.target)
+    except EnvironmentSwitchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/environment/confirm")
+async def environment_confirm(
+    request: Request, body: EnvironmentConfirmRequest
+) -> dict[str, Any]:
+    try:
+        return await request.app.state.environment_switch.confirm(
+            target_name=body.target,
+            nonce=body.nonce,
+            confirmation=body.confirmation,
+            acknowledgements=body.acknowledgements,
+        )
+    except EnvironmentSwitchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/market")
@@ -433,6 +594,11 @@ async def ml_status(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.get("/api/v1/research/status")
+async def research_status(request: Request) -> dict[str, Any]:
+    return request.app.state.research_monitor.status()
+
+
 @app.post("/api/v1/ml/train")
 async def ml_train(request: Request, body: ModelTrainRequest) -> dict[str, Any]:
     try:
@@ -504,6 +670,10 @@ async def autonomy_enable(
     request: Request, body: AutonomyEnableRequest
 ) -> dict[str, Any]:
     try:
+        if request.app.state.environment_runtime.active_profile.name == "live":
+            raise AutonomyError(
+                "Live 长期自动化尚未提供独立授权流程；不能复用 Demo master。"
+            )
         binding = await service(request).current_identity_binding()
         state = request.app.state.autonomy.enable_master(
             mode=body.mode,
@@ -544,12 +714,12 @@ async def autonomy_disable(
 
 
 @app.get("/healthz")
-async def healthz() -> dict[str, str]:
+async def healthz(request: Request) -> dict[str, str]:
     return {
         "status": "ok",
         "app": APP_NAME,
-        "environment": "demo",
-        "version": "0.3.0",
+        "environment": request.app.state.environment_runtime.active_profile.name,
+        "version": APP_VERSION,
     }
 
 
@@ -560,4 +730,4 @@ if FRONTEND_DIST.exists():
 else:
     @app.get("/", response_class=HTMLResponse)
     async def development_root() -> str:
-        return "<h1>Tideguard API</h1><p>前端尚未构建。开发时请打开 http://127.0.0.1:5173。</p>"
+        return f"<h1>{PUBLIC_APP_NAME} API</h1><p>前端尚未构建。开发时请打开 http://127.0.0.1:5173。</p>"

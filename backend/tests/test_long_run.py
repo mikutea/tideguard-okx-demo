@@ -37,6 +37,7 @@ class FakeBundle:
     model_id = MODEL_ID
     artifact_sha256 = ARTIFACT
     model = AlwaysBuyModel()
+    manifest = SimpleNamespace(market_snapshot_sha256="f" * 64)
 
 
 class FakeRegistry:
@@ -234,7 +235,7 @@ class FakeService:
         return {"safety": {"mode": "killed"}}
 
 
-def setup_coordinator(tmp_path):
+def setup_coordinator(tmp_path, *, market_data_path=None):
     audit = FakeAudit()
     autonomy = AutonomyStore(tmp_path / "autonomy.sqlite3")
     registry = FakeRegistry()
@@ -247,6 +248,8 @@ def setup_coordinator(tmp_path):
         audit=audit,  # type: ignore[arg-type]
         registry=registry,  # type: ignore[arg-type]
         autonomy=autonomy,
+        market_data_path=market_data_path,
+        market_snapshot_validator=lambda _sha: True,
         promotion_policy=PromotionPolicy(),
         policy=policy,
     )
@@ -293,6 +296,15 @@ def setup_coordinator(tmp_path):
     autonomy.record_supervisor_decision(promotion, now=NOW - timedelta(minutes=5))
     autonomy.mark_decision_applied(promotion.decision_id, now=NOW - timedelta(minutes=4))
     return coordinator, client, service, autonomy, decision
+
+
+def test_long_run_accepts_an_explicit_shared_public_market_database(tmp_path):
+    shared = tmp_path / "shared-research" / "market-data.sqlite3"
+    coordinator, _client, _service, _autonomy, _decision = setup_coordinator(
+        tmp_path,
+        market_data_path=shared,
+    )
+    assert coordinator.market_data.path == shared
 
 
 @pytest.mark.asyncio
@@ -375,7 +387,7 @@ async def test_master_disable_wins_before_entry_http_dispatch(tmp_path):
 @pytest.mark.asyncio
 async def test_shadow_uses_same_conservative_stop_take_path_as_live(tmp_path):
     coordinator, _, _, autonomy, _ = setup_coordinator(tmp_path)
-    entry_at = NOW - timedelta(hours=1)
+    entry_at = NOW - timedelta(minutes=65)
     autonomy.record_shadow_signal(
         model_id=MODEL_ID,
         artifact_sha256=ARTIFACT,
@@ -383,10 +395,12 @@ async def test_shadow_uses_same_conservative_stop_take_path_as_live(tmp_path):
         due_at=NOW,
         action="buy",
         score=0.9,
-        entry_close=Decimal("100"),
+        entry_close=Decimal("90"),
+        policy_sha256=coordinator.policy.policy_sha256,
+        round_trip_cost_bps=float(coordinator.policy.round_trip_cost_bps),
     )
     candles = []
-    for offset in range(13):
+    for offset in range(14):
         closed_at = entry_at + timedelta(minutes=5 * offset)
         low = 98.0 if offset == 3 else 99.0
         high = 103.0 if offset == 3 else 101.0
@@ -402,9 +416,16 @@ async def test_shadow_uses_same_conservative_stop_take_path_as_live(tmp_path):
             )
         )
     await coordinator._settle_shadow(tuple(candles), now=NOW)
-    summary = autonomy.shadow_summary(MODEL_ID)
+    summary = autonomy.shadow_summary(
+        MODEL_ID, policy_sha256=coordinator.policy.policy_sha256
+    )
     assert summary["settledBuys"] == 1
-    assert summary["netReturn"] == pytest.approx(-0.0174)
+    per_side = float(coordinator.policy.round_trip_cost_bps) / 20_000
+    entry_fill = 100 * (1 + per_side)
+    stop = entry_fill * (1 - float(coordinator.policy.stop_loss_fraction))
+    assert summary["netReturn"] == pytest.approx(
+        stop * (1 - per_side) / (100 * (1 + per_side)) - 1
+    )
 
 
 @pytest.mark.asyncio

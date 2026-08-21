@@ -1,8 +1,8 @@
-#define MyAppName "Tideguard"
-#define MyAppPublisher "Tideguard"
+#define MyAppName "墨衡 MOHENG"
+#define MyAppPublisher "MOHENG"
 #define MyAppExeName "Tideguard.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.3.0"
+  #define MyAppVersion "0.4.0"
 #endif
 #define MyAppSourceDir GetEnv("TIDEGUARD_PACKAGE_SOURCE")
 #if MyAppSourceDir == ""
@@ -17,16 +17,23 @@
 AppId={{2D2663B4-03DE-4F3D-BC77-12556DEBA51F}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+LicenseFile=..\LICENSE
 AppPublisher={#MyAppPublisher}
+AppPublisherURL=https://github.com/mikutea/tideguard-okx-demo
+AppSupportURL=https://github.com/mikutea/tideguard-okx-demo/issues
+AppUpdatesURL=https://github.com/mikutea/tideguard-okx-demo/releases
 DefaultDirName={localappdata}\Programs\Tideguard
-DefaultGroupName=Tideguard
+DefaultGroupName=墨衡 MOHENG
+UsePreviousGroup=no
+UsePreviousTasks=no
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir=output
-OutputBaseFilename=Tideguard-Setup-{#MyAppVersion}
+OutputBaseFilename=Moheng-Setup-{#MyAppVersion}
+SetupIconFile=..\assets\brand\moheng.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -42,7 +49,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加快捷方式："; Flags: unchecked
-Name: "autostart"; Description: "登录 Windows 后启动 Tideguard 后台服务"; GroupDescription: "长期运行："
+Name: "autostart"; Description: "登录 Windows 后启动墨衡后台研究服务（系统策略允许时）"; GroupDescription: "长期运行："; Flags: unchecked
 
 [Files]
 Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -50,17 +57,24 @@ Source: "{#MyWebView2Bootstrapper}"; DestDir: "{tmp}"; DestName: "MicrosoftEdgeW
 
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{userprograms}\Tideguard"
+Type: files; Name: "{autodesktop}\Tideguard.lnk"
+Type: files; Name: "{userstartup}\Tideguard 后台服务.lnk"
+Type: files; Name: "{userstartup}\墨衡后台服务.lnk"
 
 [Icons]
-Name: "{group}\Tideguard"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\Tideguard 凭证管理"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--credentials"
-Name: "{group}\停止 Tideguard 后台服务"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--stop-daemon"
-Name: "{autodesktop}\Tideguard"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
-Name: "{userstartup}\Tideguard 后台服务"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--daemon"; WorkingDir: "{app}"; Tasks: autostart
+Name: "{group}\墨衡 MOHENG"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\墨衡凭证管理"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--credentials"
+Name: "{group}\启动墨衡后台服务"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--daemon"; WorkingDir: "{app}"
+Name: "{group}\停止墨衡后台服务"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--stop-daemon"
+Name: "{autodesktop}\墨衡 MOHENG"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Tideguard.BackgroundService"; ValueData: "{code:GetAutostartCommand}"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--daemon"; Description: "启动 Tideguard 后台服务"; Flags: nowait runhidden postinstall skipifsilent; Tasks: autostart
-Filename: "{app}\{#MyAppExeName}"; Description: "启动 Tideguard"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--daemon"; Description: "启动墨衡后台研究服务"; Flags: nowait runhidden postinstall skipifsilent; Tasks: autostart
+Filename: "{app}\{#MyAppExeName}"; Description: "启动墨衡 MOHENG"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--stop-daemon"; Flags: runhidden waituntilterminated; RunOnceId: "StopTideguardDaemon"
@@ -112,9 +126,17 @@ begin
   begin
     if not Exec(ExePath, '--stop-daemon', '', SW_HIDE,
       ewWaitUntilTerminated, ResultCode) then
+      Result := False
+    else if ResultCode <> 0 then
       Result := False;
-    Sleep(750);
+    if Result then
+      Sleep(750);
   end;
+end;
+
+function GetAutostartCommand(Param: String): String;
+begin
+  Result := '"' + ExpandConstant('{app}\{#MyAppExeName}') + '" --daemon';
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -122,7 +144,7 @@ begin
   if StopExistingDaemon() then
     Result := ''
   else
-    Result := '无法停止现有 Tideguard 后台服务，请稍后重试。';
+    Result := '无法停止现有墨衡后台服务，请稍后重试。';
 end;
 
 function InitializeUninstall(): Boolean;

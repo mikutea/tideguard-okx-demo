@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
 from typing import Any
 
 from ..audit import AuditStore
@@ -22,7 +23,10 @@ from .strategy import canonical_json, sha256_hex
 from .walk_forward import ValidationReport
 
 
-SUPERVISOR_REVIEW_SCHEMA = "tideguard.codex-review.v1"
+SUPERVISOR_REVIEW_SCHEMA = "tideguard.codex-review.v2"
+LIVE_SHADOW_MIN_SETTLED = 100
+LIVE_SHADOW_MIN_DAYS = 90
+LIVE_DEMO_MIN_CLOSED_POSITIONS = 30
 
 
 def _utc(value: datetime) -> datetime:
@@ -46,12 +50,14 @@ class CodexSupervisor:
         audit: AuditStore,
         promotion_policy: PromotionPolicy,
         autonomy_policy: AutonomyPolicy,
+        market_snapshot_validator: Callable[[str | None], bool] | None = None,
     ) -> None:
         self.registry = registry
         self.autonomy = autonomy
         self.audit = audit
         self.promotion_policy = promotion_policy
         self.autonomy_policy = autonomy_policy
+        self.market_snapshot_validator = market_snapshot_validator
 
     def _model_reviews(self) -> list[dict[str, Any]]:
         reviews: list[dict[str, Any]] = []
@@ -67,33 +73,52 @@ class CodexSupervisor:
             if validation:
                 report = ValidationReport.from_dict(validation["report"])
                 deterministic_failures = list(self.promotion_policy.failures(report))
+                if self.market_snapshot_validator and not self.market_snapshot_validator(
+                    report.market_snapshot_sha256
+                ):
+                    deterministic_failures.append("market_snapshot_not_current")
                 metrics = {
                     "aggregateAccuracy": report.aggregate_accuracy,
+                    "benchmarkCohortId": report.benchmark_cohort_id,
+                    "evaluationDatasetSha256": report.dataset_sha256,
                     "evaluationMode": report.evaluation_mode,
                     "folds": len(report.folds),
                     "maxDrawdown": report.max_drawdown,
+                    "marketSnapshotSha256": report.market_snapshot_sha256,
                     "netReturn": report.aggregate_net_return,
                     "oosRows": report.oos_rows,
                     "reportSha256": report.report_sha256,
                     "roundTripCostBps": report.round_trip_cost_bps,
+                    "splitProtocolSha256": report.split_protocol_sha256,
+                    "testFrom": report.folds[0].test_start_at.isoformat(),
+                    "testThrough": report.folds[-1].test_stop_at.isoformat(),
                     "trades": report.trades,
                     "worstFoldNetReturn": report.worst_fold_net_return,
                 }
-            shadow = self.autonomy.shadow_summary(str(model["modelId"]))
+            shadow = self.autonomy.shadow_summary(
+                str(model["modelId"]),
+                policy_sha256=self.autonomy_policy.policy_sha256,
+            )
             shadow_failures = self.shadow_failures(shadow)
             reviews.append(
                 {
                     "artifactSha256": model["artifactSha256"],
+                    "comparisonBaselineCohort": None,
+                    "comparisonBaselineModelId": None,
                     "createdAt": model["createdAt"],
                     "comparisonFailures": [],
                     "deterministicFailures": deterministic_failures,
+                    "fitDatasetSha256": model.get("fitDatasetSha256"),
+                    "fitRows": model.get("fitRows"),
                     "metrics": metrics,
                     "modelId": model["modelId"],
                     "shadow": shadow,
                     "shadowFailures": list(shadow_failures),
                     "state": model["state"],
                     "trainedThrough": model["trainedThrough"],
+                    "trainedFrom": model.get("trainedFrom"),
                     "trainer": model["trainer"],
+                    "trainingConfigSha256": model.get("trainingConfigSha256"),
                     "validationRunId": model.get("validationRunId"),
                 }
             )
@@ -108,6 +133,24 @@ class CodexSupervisor:
                 None,
             )
             champion_metrics = champion_review.get("metrics") if champion_review else None
+            champion_training_config = (
+                champion_review.get("trainingConfigSha256") if champion_review else None
+            )
+            comparison_fields = (
+                "benchmarkCohortId",
+                "evaluationDatasetSha256",
+                "marketSnapshotSha256",
+                "splitProtocolSha256",
+                "testFrom",
+                "testThrough",
+            )
+
+            def same_cohort(left: dict[str, Any], right: dict[str, Any]) -> bool:
+                return all(
+                    left.get(field) and left.get(field) == right.get(field)
+                    for field in comparison_fields
+                )
+
             for item in reviews:
                 if item["modelId"] == champion["modelId"] or item["state"] != "validated":
                     continue
@@ -116,16 +159,43 @@ class CodexSupervisor:
                 if not candidate_metrics or not champion_metrics:
                     failures.append("champion_comparison_missing")
                 else:
-                    required_net = float(champion_metrics["netReturn"]) + float(
-                        self.autonomy_policy.min_challenger_oos_improvement
+                    baseline = (
+                        champion_review
+                        if same_cohort(candidate_metrics, champion_metrics)
+                        else next(
+                            (
+                                review
+                                for review in reviews
+                                if champion_training_config
+                                and review.get("trainingConfigSha256")
+                                == champion_training_config
+                                and review.get("metrics")
+                                and same_cohort(
+                                    candidate_metrics,
+                                    review["metrics"],
+                                )
+                            ),
+                            None,
+                        )
                     )
-                    if float(candidate_metrics["netReturn"]) < required_net:
-                        failures.append("challenger_oos_improvement_insufficient")
-                    maximum_drawdown = float(champion_metrics["maxDrawdown"]) + float(
-                        self.autonomy_policy.max_challenger_drawdown_regression
-                    )
-                    if float(candidate_metrics["maxDrawdown"]) > maximum_drawdown:
-                        failures.append("challenger_drawdown_regression")
+                    baseline_metrics = baseline.get("metrics") if baseline else None
+                    if not baseline_metrics:
+                        failures.append("champion_comparison_missing")
+                    else:
+                        item["comparisonBaselineModelId"] = baseline["modelId"]
+                        item["comparisonBaselineCohort"] = baseline_metrics.get(
+                            "benchmarkCohortId"
+                        )
+                        required_net = float(baseline_metrics["netReturn"]) + float(
+                            self.autonomy_policy.min_challenger_oos_improvement
+                        )
+                        if float(candidate_metrics["netReturn"]) < required_net:
+                            failures.append("challenger_oos_improvement_insufficient")
+                        maximum_drawdown = float(baseline_metrics["maxDrawdown"]) + float(
+                            self.autonomy_policy.max_challenger_drawdown_regression
+                        )
+                        if float(candidate_metrics["maxDrawdown"]) > maximum_drawdown:
+                            failures.append("challenger_drawdown_regression")
                 item["comparisonFailures"] = failures
         return reviews
 
@@ -143,8 +213,66 @@ class CodexSupervisor:
             failures.append("shadow_drawdown_above_limit")
         return tuple(failures)
 
+    def live_readiness(
+        self,
+        *,
+        champion: dict[str, Any] | None,
+        models: list[dict[str, Any]],
+        demo_performance: dict[str, Any],
+    ) -> dict[str, Any]:
+        champion_review = next(
+            (
+                model
+                for model in models
+                if champion and model["modelId"] == champion.get("modelId")
+            ),
+            None,
+        )
+        shadow = champion_review.get("shadow") if champion_review else {}
+        evidence_failures: list[str] = []
+        if champion_review is None:
+            evidence_failures.append("live_champion_missing")
+        if int(shadow.get("settledBuys") or 0) < LIVE_SHADOW_MIN_SETTLED:
+            evidence_failures.append("live_shadow_buys_insufficient")
+        if float(shadow.get("durationDays") or 0.0) < LIVE_SHADOW_MIN_DAYS:
+            evidence_failures.append("live_shadow_duration_insufficient")
+        if float(shadow.get("netReturn") or 0.0) <= 0:
+            evidence_failures.append("live_shadow_net_return_not_positive")
+        if float(shadow.get("maxDrawdown", 1.0)) > float(
+            self.autonomy_policy.max_demo_drawdown
+        ):
+            evidence_failures.append("live_shadow_drawdown_above_limit")
+        if int(demo_performance.get("closedPositions") or 0) < LIVE_DEMO_MIN_CLOSED_POSITIONS:
+            evidence_failures.append("live_demo_round_trips_insufficient")
+        if float(demo_performance.get("netReturn") or 0.0) <= 0:
+            evidence_failures.append("live_demo_net_return_not_positive")
+        if float(demo_performance.get("maxDrawdown", 1.0)) > float(
+            self.autonomy_policy.max_demo_drawdown
+        ):
+            evidence_failures.append("live_demo_drawdown_above_limit")
+        return {
+            "automatedLiveExecutionEnabled": False,
+            "deploymentBlockers": ["live_ai_execution_disabled"],
+            "evidenceFailures": evidence_failures,
+            "evidenceGatePassed": not evidence_failures,
+            "modelId": champion.get("modelId") if champion else None,
+            "policy": {
+                "maxDrawdown": str(self.autonomy_policy.max_demo_drawdown),
+                "minimumDemoClosedPositions": LIVE_DEMO_MIN_CLOSED_POSITIONS,
+                "minimumProspectiveShadowBuys": LIVE_SHADOW_MIN_SETTLED,
+                "minimumProspectiveShadowDays": LIVE_SHADOW_MIN_DAYS,
+                "requiresPositiveDemoNetReturn": True,
+                "requiresPositiveShadowNetReturn": True,
+                "shadowProtocolVersion": shadow.get("protocolVersion"),
+            },
+            "readyForLive": False,
+        }
+
     def review_pack(self, *, now: datetime) -> dict[str, Any]:
         generated = _utc(now)
+        champion = self.registry.champion_summary()
+        demo_performance = self.autonomy.demo_performance()
+        models = self._model_reviews()
         body = {
             "auditChainValid": self.audit.verify_chain(),
             "autonomyPolicy": {
@@ -153,18 +281,22 @@ class CodexSupervisor:
             },
             "autonomyState": self.autonomy.state(),
             "activePosition": self.autonomy.active_position(),
-            "champion": self.registry.champion_summary(),
-            "demoPerformance": self.autonomy.demo_performance(),
+            "champion": champion,
+            "demoPerformance": demo_performance,
             "generatedAt": _iso(generated),
             "generation": self.registry.get_generation(),
-            "models": self._model_reviews(),
+            "liveReadiness": self.live_readiness(
+                champion=champion,
+                models=models,
+                demo_performance=demo_performance,
+            ),
+            "models": models,
             "promotionPolicy": {
                 **self.promotion_policy.to_dict(),
                 "policySha256": self.promotion_policy.policy_sha256,
             },
             "schemaVersion": SUPERVISOR_REVIEW_SCHEMA,
         }
-        champion = body["champion"]
         body["championSupervisorApproved"] = bool(
             champion
             and self.autonomy.applied_champion_decision(

@@ -5,10 +5,15 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
+from .profile import DEMO_PROFILE, EnvironmentProfile
+
 
 APP_NAME = "Tideguard"
+PUBLIC_APP_NAME = "墨衡 MOHENG"
+APP_VERSION = "0.4.0"
 OKX_BASE_URL = "https://openapi.okx.com"
-SIMULATED_HEADER = "1"
+SIMULATED_HEADER = DEMO_PROFILE.private_headers["x-simulated-trading"]
+ENVIRONMENT_SELECTOR_FILE = "environment.json"
 ALLOWED_INSTRUMENTS = frozenset({"BTC-USDT"})
 ALLOWED_PRIVATE_ENDPOINTS = frozenset(
     {
@@ -64,3 +69,15 @@ class RiskPolicy:
 
 
 POLICY = RiskPolicy()
+LIVE_POLICY = RiskPolicy(
+    policy_version="live-v1-observe-locked",
+    max_order_notional_usdt=Decimal("10"),
+    max_order_equity_fraction=Decimal("0.0005"),
+    max_open_orders=1,
+    arm_ttl_seconds=60,
+    automation_arm_ttl_seconds=60,
+)
+
+
+def policy_for_profile(profile: EnvironmentProfile) -> RiskPolicy:
+    return POLICY if profile.name == "demo" else LIVE_POLICY

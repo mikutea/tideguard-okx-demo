@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Literal
 
 from ..audit import AuditStore
+from ..build_info import BUILD_REVISION
 from ..models import OrderDraft
 from ..okx_client import OkxApiError, OkxClient, OkxClientError
 from ..service import (
@@ -15,15 +19,26 @@ from ..service import (
     CommitBlockedBeforeDispatch,
     TradingService,
 )
-from .autonomy import AutonomyError, AutonomyPolicy, AutonomyStore, PositionStateError
+from .autonomy import (
+    LEGACY_SHADOW_PROTOCOL_VERSION,
+    SHADOW_PROTOCOL_VERSION,
+    AutonomyError,
+    AutonomyPolicy,
+    AutonomyStore,
+    PositionStateError,
+)
 from .pipeline import (
     BAR_MILLISECONDS,
     DEFAULT_LABEL_HORIZON,
     ParsedCandle,
+    WARMUP_BARS,
+    feature_contract_sha256,
     latest_features,
     parse_completed_candles,
+    prepare_training_dataset,
     train_and_register_candidate,
 )
+from .market_data import MarketDataError, MarketDataStore, MarketSnapshot
 from .registry import ModelRegistry, PromotionPolicy, RegistryError
 from .strategy import canonical_json, sha256_hex
 from .supervisor import CodexSupervisor
@@ -31,8 +46,9 @@ from .walk_forward import TrainingConfig, WalkForwardSpec
 
 
 LONG_RUN_LOOP_SECONDS = 5
-MODEL_HISTORY_CANDLES = 10_000
 SHADOW_RECOVERY_CANDLES = 2_000
+V4_TRAIN_BARS = 365 * 24 * 12
+V4_TEST_BARS = 90 * 24 * 12
 LONG_RUN_PROMOTION_POLICY = PromotionPolicy(
     min_folds=5,
     min_oos_rows=1_000,
@@ -42,14 +58,6 @@ LONG_RUN_PROMOTION_POLICY = PromotionPolicy(
     min_aggregate_net_return=0.005,
     min_worst_fold_net_return=-0.03,
     max_drawdown=0.10,
-)
-LONG_RUN_WALK_FORWARD_SPEC = WalkForwardSpec(
-    train_size=5_000,
-    test_size=500,
-    step_size=500,
-    label_horizon=DEFAULT_LABEL_HORIZON,
-    embargo_size=1,
-    expanding=True,
 )
 
 
@@ -88,25 +96,67 @@ def _long_run_training_configs(policy: AutonomyPolicy) -> tuple[TrainingConfig, 
 
 
 def _train_candidate_family(
-    raw: list[list[Any]],
+    raw: Sequence[Sequence[Any]],
     registry: ModelRegistry,
     *,
     now: datetime,
     promotion_policy: PromotionPolicy,
     autonomy_policy: AutonomyPolicy,
+    walk_forward_spec: WalkForwardSpec,
+    progress: Callable[[int, int], None] | None = None,
 ) -> list[Any]:
-    return [
-        train_and_register_candidate(
-            raw,
-            registry,
-            now=now,
-            code_revision="tideguard-v0.3-long-run",
-            promotion_policy=promotion_policy,
-            training_config=config,
-            walk_forward_spec=LONG_RUN_WALK_FORWARD_SPEC,
+    configs = _long_run_training_configs(autonomy_policy)
+    prepared = prepare_training_dataset(
+        raw,
+        now=now,
+        training_config=configs[0],
+    )
+    results: list[Any] = []
+    for index, config in enumerate(configs, start=1):
+        results.append(
+            train_and_register_candidate(
+                raw,
+                registry,
+                now=now,
+                code_revision=os.environ.get("TIDEGUARD_BUILD_REVISION", BUILD_REVISION),
+                promotion_policy=promotion_policy,
+                training_config=config,
+                walk_forward_spec=walk_forward_spec,
+                prepared_dataset=prepared,
+                final_fit_rows=V4_TRAIN_BARS,
+            )
         )
-        for config in _long_run_training_configs(autonomy_policy)
-    ]
+        if progress:
+            progress(index, len(configs))
+    return results
+
+
+def _v4_walk_forward_spec(snapshot: MarketSnapshot) -> WalkForwardSpec:
+    protocol = WalkForwardSpec(
+        train_size=V4_TRAIN_BARS,
+        test_size=V4_TEST_BARS,
+        step_size=V4_TEST_BARS,
+        label_horizon=DEFAULT_LABEL_HORIZON,
+        embargo_size=1,
+        expanding=False,
+    )
+    cohort_material = canonical_json(
+        {
+            "market_snapshot_sha256": snapshot.content_sha256,
+            "split_protocol_sha256": protocol.split_protocol_sha256,
+        }
+    )
+    cohort_id = f"cohort_{sha256_hex(cohort_material)[:24]}"
+    return WalkForwardSpec(
+        train_size=protocol.train_size,
+        test_size=protocol.test_size,
+        step_size=protocol.step_size,
+        label_horizon=protocol.label_horizon,
+        embargo_size=protocol.embargo_size,
+        expanding=False,
+        benchmark_cohort_id=cohort_id,
+        market_snapshot_sha256=snapshot.content_sha256,
+    )
 
 
 class LongRunError(RuntimeError):
@@ -175,6 +225,8 @@ class LongRunCoordinator:
         audit: AuditStore,
         registry: ModelRegistry,
         autonomy: AutonomyStore,
+        market_data_path: Path | None = None,
+        market_snapshot_validator: Callable[[str | None], bool] | None = None,
         promotion_policy: PromotionPolicy | None = None,
         policy: AutonomyPolicy | None = None,
     ) -> None:
@@ -183,6 +235,12 @@ class LongRunCoordinator:
         self.audit = audit
         self.registry = registry
         self.autonomy = autonomy
+        self.market_data = MarketDataStore(
+            market_data_path or (autonomy.path.parent / "market-data.sqlite3")
+        )
+        self._market_snapshot_validator = (
+            market_snapshot_validator or self.market_data.snapshot_is_current
+        )
         self.promotion_policy = promotion_policy or LONG_RUN_PROMOTION_POLICY
         self.policy = policy or AutonomyPolicy()
         self.supervisor = CodexSupervisor(
@@ -191,6 +249,7 @@ class LongRunCoordinator:
             audit=audit,
             promotion_policy=self.promotion_policy,
             autonomy_policy=self.policy,
+            market_snapshot_validator=self._market_snapshot_validator,
         )
         self._cycle_lock = asyncio.Lock()
         self._closed = False
@@ -215,6 +274,7 @@ class LongRunCoordinator:
             "policy": {**self.policy.to_dict(), "policySha256": self.policy.policy_sha256},
             "champion": champion,
             "activeSupervisorLease": lease,
+            "dataWarehouse": self.market_data.status(),
             "review": self.supervisor.review_pack(now=self._now()),
             "lastError": self._last_error,
         }
@@ -223,6 +283,7 @@ class LongRunCoordinator:
         self,
         task: asyncio.Task[Any],
         run_id: str,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         try:
             results = await task
@@ -235,7 +296,10 @@ class LongRunCoordinator:
                 now=self._now(),
             )
             raise
-        payload = {"candidates": [result.to_dict() for result in results]}
+        payload = {
+            "candidates": [result.to_dict() for result in results],
+            **(metadata or {}),
+        }
         self.autonomy.finish_training(
             run_id,
             model_id=results[0].model_id,
@@ -255,9 +319,67 @@ class LongRunCoordinator:
             return None
         run_id = self.autonomy.start_training(now=now)
         try:
-            raw = await self.client.get_history_candles(limit=MODEL_HISTORY_CANDLES)
-            if len(raw) < MODEL_HISTORY_CANDLES:
-                raise LongRunError("public history did not return the requested training window")
+            def sync_progress(pages: int, inserted: int) -> None:
+                if pages == 1 or pages % 25 == 0:
+                    self.autonomy.update_training_progress(
+                        run_id,
+                        phase="syncing",
+                        current=pages,
+                    )
+
+            sync_result = await self.market_data.sync_all(
+                self.client,
+                now=now,
+                progress=sync_progress,
+            )
+            if not sync_result["backfillComplete"]:
+                raise LongRunError("official public history backfill is incomplete")
+            if sync_result["missingBars"] or sync_result["unresolvedConflicts"]:
+                raise LongRunError("official public history failed the data quality gate")
+            self.autonomy.update_training_progress(
+                run_id,
+                phase="snapshotting",
+                current=0,
+            )
+            snapshot = self.market_data.create_snapshot(
+                feature_contract_sha256=feature_contract_sha256(),
+                now=self._now(),
+            )
+            minimum_rows = (
+                V4_TRAIN_BARS
+                + DEFAULT_LABEL_HORIZON
+                + 1
+                + V4_TEST_BARS
+                + WARMUP_BARS
+                + DEFAULT_LABEL_HORIZON
+            )
+            if snapshot.row_count < minimum_rows:
+                raise LongRunError("official history is too short for the v4 rolling protocol")
+            raw = self.market_data.snapshot_rows(snapshot.snapshot_id)
+            walk_forward_spec = _v4_walk_forward_spec(snapshot)
+            self.autonomy.update_training_progress(
+                run_id,
+                phase="feature_build",
+                current=0,
+                total=3,
+                snapshot_id=snapshot.snapshot_id,
+                data_rows=snapshot.row_count,
+            )
+
+            def candidate_progress(current: int, total: int) -> None:
+                self.autonomy.update_training_progress(
+                    run_id,
+                    phase="walk_forward" if current < total else "registering",
+                    current=current,
+                    total=total,
+                    snapshot_id=snapshot.snapshot_id,
+                    data_rows=snapshot.row_count,
+                )
+
+            metadata = {
+                "dataSnapshot": snapshot.to_dict(),
+                "syncRunId": sync_result["runId"],
+            }
             task = asyncio.create_task(
                 asyncio.to_thread(
                     _train_candidate_family,
@@ -266,14 +388,21 @@ class LongRunCoordinator:
                     now=now,
                     promotion_policy=self.promotion_policy,
                     autonomy_policy=self.policy,
+                    walk_forward_spec=walk_forward_spec,
+                    progress=candidate_progress,
                 )
             )
             try:
                 results = await asyncio.shield(task)
             except asyncio.CancelledError:
-                await self._finish_training_after_cancellation(task, run_id)
+                await self._finish_training_after_cancellation(
+                    task, run_id, metadata=metadata
+                )
                 raise
-            payload = {"candidates": [result.to_dict() for result in results]}
+            payload = {
+                "candidates": [result.to_dict() for result in results],
+                **metadata,
+            }
             self.autonomy.finish_training(
                 run_id,
                 model_id=results[0].model_id,
@@ -287,6 +416,8 @@ class LongRunCoordinator:
                     "candidateCount": len(results),
                     "modelIds": [result.model_id for result in results],
                     "runId": run_id,
+                    "snapshotId": snapshot.snapshot_id,
+                    "snapshotSha256": snapshot.content_sha256,
                     "validationRunIds": [result.validation_run_id for result in results],
                 },
                 actor="system",
@@ -314,6 +445,8 @@ class LongRunCoordinator:
                 )
             except Exception:
                 pass
+            if isinstance(exc, MarketDataError):
+                raise LongRunError(str(exc)) from exc
             raise
 
     async def train_now(self) -> dict[str, Any]:
@@ -349,17 +482,30 @@ class LongRunCoordinator:
         if not pending:
             return
         candle_by_time = {row.closed_at: row for row in candles}
-        missing = [
-            row
-            for row in pending
-            if _parse_iso(str(row["due_at"])) not in candle_by_time
-            or _parse_iso(str(row["candle_closed_at"])) not in candle_by_time
-        ]
+        missing = []
+        for row in pending:
+            if str(row.get("protocol_version") or LEGACY_SHADOW_PROTOCOL_VERSION) != SHADOW_PROTOCOL_VERSION:
+                continue
+            signal_at = _parse_iso(str(row["candle_closed_at"]))
+            required = [
+                signal_at + timedelta(milliseconds=BAR_MILLISECONDS * offset)
+                for offset in range(1, self.policy.hold_bars + 2)
+            ]
+            if any(required_at not in candle_by_time for required_at in required):
+                missing.append(row)
         if missing:
             history = await self.client.get_history_candles(limit=SHADOW_RECOVERY_CANDLES)
             recovered = parse_completed_candles(history, now=now)
             candle_by_time.update({row.closed_at: row for row in recovered})
         for row in pending:
+            protocol_version = str(
+                row.get("protocol_version") or LEGACY_SHADOW_PROTOCOL_VERSION
+            )
+            if protocol_version != SHADOW_PROTOCOL_VERSION:
+                self.autonomy.exclude_legacy_shadow(str(row["signal_id"]), now=now)
+                continue
+            if row.get("policy_sha256") != self.policy.policy_sha256:
+                raise LongRunError("a due shadow signal is bound to a different policy")
             entry_at = _parse_iso(str(row["candle_closed_at"]))
             due_at = _parse_iso(str(row["due_at"]))
             path = [
@@ -368,25 +514,41 @@ class LongRunCoordinator:
                 if entry_at + timedelta(milliseconds=BAR_MILLISECONDS * offset)
                 in candle_by_time
             ]
-            if len(path) != self.policy.hold_bars or path[-1].closed_at != due_at:
+            exit_candle_at = entry_at + timedelta(
+                milliseconds=BAR_MILLISECONDS * (self.policy.hold_bars + 1)
+            )
+            exit_candle = candle_by_time.get(exit_candle_at)
+            if (
+                len(path) != self.policy.hold_bars
+                or exit_candle is None
+                or exit_candle.closed_at != due_at
+            ):
                 raise LongRunError("a due shadow signal has an incomplete holding path")
-            entry_close = _decimal(row["entry_close"], "shadow entry close")
-            stop_price = entry_close * (Decimal("1") - self.policy.stop_loss_fraction)
-            take_price = entry_close * (Decimal("1") + self.policy.take_profit_fraction)
-            exit_close: Decimal | None = None
+            entry_open = Decimal(str(path[0].open))
+            per_side_cost = self.policy.round_trip_cost_bps / Decimal("20000")
+            entry_fill = entry_open * (Decimal("1") + per_side_cost)
+            stop_price = entry_fill * (Decimal("1") - self.policy.stop_loss_fraction)
+            take_price = entry_fill * (Decimal("1") + self.policy.take_profit_fraction)
+            exit_price: Decimal | None = None
+            exit_reason: Literal["stop_loss", "take_profit", "time_exit"] = "time_exit"
             for candle in path:
                 if Decimal(str(candle.low)) <= stop_price:
-                    exit_close = stop_price
+                    exit_price = stop_price
+                    exit_reason = "stop_loss"
                     break
                 if Decimal(str(candle.high)) >= take_price:
-                    exit_close = take_price
+                    exit_price = take_price
+                    exit_reason = "take_profit"
                     break
-            if exit_close is None:
-                exit_close = Decimal(str(path[-1].close))
+            if exit_price is None:
+                exit_price = Decimal(str(exit_candle.open))
             self.autonomy.settle_shadow(
                 str(row["signal_id"]),
-                exit_close=exit_close,
+                entry_open=entry_open,
+                exit_price=exit_price,
                 round_trip_cost_bps=float(self.policy.round_trip_cost_bps),
+                exit_reason=exit_reason,
+                policy_sha256=self.policy.policy_sha256,
                 now=now,
             )
 
@@ -399,7 +561,7 @@ class LongRunCoordinator:
         features, candle_closed_at = latest_features(candles)
         entry_close = Decimal(str(candles[-1].close))
         due_at = candle_closed_at + timedelta(
-            milliseconds=BAR_MILLISECONDS * DEFAULT_LABEL_HORIZON
+            milliseconds=BAR_MILLISECONDS * (self.policy.hold_bars + 1)
         )
         for metadata in self.registry.list_models(limit=100):
             if metadata["state"] not in {"validated", "champion", "retired"}:
@@ -419,6 +581,8 @@ class LongRunCoordinator:
                 action="buy",
                 score=score,
                 entry_close=entry_close,
+                policy_sha256=self.policy.policy_sha256,
+                round_trip_cost_bps=float(self.policy.round_trip_cost_bps),
             )
 
     def _market_values(self, bundle: dict[str, Any], *, now: datetime) -> dict[str, Decimal]:
@@ -1011,6 +1175,15 @@ class LongRunCoordinator:
             if champion is None:
                 self.autonomy.set_runtime_status(
                     "waiting_champion", reason="尚无通过 Codex 审查的 champion", now=now
+                )
+                return
+            if not self._market_snapshot_validator(
+                champion.bundle.manifest.market_snapshot_sha256
+            ):
+                self.autonomy.set_runtime_status(
+                    "suspended",
+                    reason="champion 绑定的历史起点已失效，等待重新训练与 Codex 审查",
+                    now=now,
                 )
                 return
             if self.autonomy.applied_champion_decision(

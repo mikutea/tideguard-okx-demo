@@ -14,6 +14,12 @@ from okx_demo_lab.ml.autonomy import (
 )
 from okx_demo_lab.ml.registry import PromotionPolicy
 from okx_demo_lab.ml.supervisor import CodexSupervisor
+from okx_demo_lab.ml.walk_forward import (
+    Observation,
+    TrainingConfig,
+    WalkForwardSpec,
+    run_walk_forward,
+)
 
 
 NOW = datetime(2026, 8, 20, 0, 0, tzinfo=timezone.utc)
@@ -105,7 +111,7 @@ def pack(autonomy: AutonomyStore, registry: FakeRegistry, *, state="validated"):
         "generation": registry.get_generation(),
         "models": [model_review(state)],
         "promotionPolicy": {},
-        "schemaVersion": "tideguard.codex-review.v1",
+        "schemaVersion": "tideguard.codex-review.v2",
     }
 
 
@@ -121,6 +127,37 @@ def supervisor(tmp_path):
         autonomy_policy=AutonomyPolicy(),
     )
     return instance, registry, autonomy, audit
+
+
+def cohort_report(
+    cohort_suffix: str,
+    snapshot_character: str,
+    *,
+    l2: float = 0.001,
+):
+    rows = tuple(
+        Observation(
+            observed_at=NOW - timedelta(minutes=5 * (72 - index)),
+            features=(2.0 if index % 2 == 0 else -2.0,),
+            label=1 if index % 2 == 0 else 0,
+            forward_return=0.01 if index % 2 == 0 else -0.01,
+        )
+        for index in range(72)
+    )
+    return run_walk_forward(
+        rows,
+        ("signal",),
+        WalkForwardSpec(
+            train_size=20,
+            test_size=10,
+            step_size=10,
+            expanding=False,
+            benchmark_cohort_id="cohort_" + cohort_suffix * 24,
+            market_snapshot_sha256=snapshot_character * 64,
+        ),
+        TrainingConfig(epochs=5, l2=l2, round_trip_cost_bps=24),
+        created_at=NOW,
+    )
 
 
 def test_codex_approval_is_evidence_bound_and_applied_after_promotion(
@@ -148,6 +185,35 @@ def test_codex_approval_is_evidence_bound_and_applied_after_promotion(
     assert decisions[0]["kind"] == "promote"
     assert decisions[0]["appliedAt"] is not None
     assert audit.events[0][0] == "ml.codex_promoted"
+
+
+def test_live_readiness_separates_evidence_from_disabled_deployment(tmp_path):
+    instance, _, _, _ = supervisor(tmp_path)
+    readiness = instance.live_readiness(
+        champion={"modelId": MODEL_ID},
+        models=[
+            {
+                "modelId": MODEL_ID,
+                "shadow": {
+                    "settledBuys": 100,
+                    "durationDays": 90.0,
+                    "netReturn": 0.02,
+                    "maxDrawdown": 0.01,
+                    "protocolVersion": "moheng.shadow.next-open-bracket.v2",
+                },
+            }
+        ],
+        demo_performance={
+            "closedPositions": 30,
+            "netReturn": 0.01,
+            "maxDrawdown": 0.01,
+        },
+    )
+
+    assert readiness["evidenceGatePassed"] is True
+    assert readiness["readyForLive"] is False
+    assert readiness["automatedLiveExecutionEnabled"] is False
+    assert readiness["deploymentBlockers"] == ["live_ai_execution_disabled"]
 
 
 def test_codex_lease_requires_user_demo_master_and_becomes_active_only_after_audit(
@@ -302,3 +368,166 @@ def test_codex_rejection_is_bound_to_one_candidate(tmp_path, monkeypatch):
     assert decision["modelId"] == MODEL_ID
     assert decision["appliedAt"] is not None
     assert audit.events[0][1]["modelId"] == MODEL_ID
+
+
+def test_cross_cohort_comparison_uses_the_paired_champion_recipe_and_fails_closed_without_it():
+    champion_report = cohort_report("1", "a")
+    paired_report = cohort_report("2", "b")
+    challenger_report = cohort_report("2", "b", l2=0.01)
+
+    class CohortRegistry:
+        include_paired_recipe = True
+
+        def list_models(self, limit=100):
+            rows = [
+                {
+                    "modelId": "champion",
+                    "artifactSha256": "c" * 64,
+                    "state": "champion",
+                    "trainer": "test",
+                    "createdAt": NOW.isoformat(),
+                    "trainedThrough": NOW.isoformat(),
+                    "trainingConfigSha256": "a" * 64,
+                    "validationRunId": champion_report.validation_run_id,
+                },
+            ]
+            if self.include_paired_recipe:
+                rows.append(
+                    {
+                        "modelId": "paired-recipe",
+                        "artifactSha256": "e" * 64,
+                        "state": "validated",
+                        "trainer": "test",
+                        "createdAt": NOW.isoformat(),
+                        "trainedThrough": NOW.isoformat(),
+                        "trainingConfigSha256": "a" * 64,
+                        "validationRunId": paired_report.validation_run_id,
+                    }
+                )
+            rows.append(
+                {
+                    "modelId": "challenger",
+                    "artifactSha256": "d" * 64,
+                    "state": "validated",
+                    "trainer": "test",
+                    "createdAt": NOW.isoformat(),
+                    "trainedThrough": NOW.isoformat(),
+                    "trainingConfigSha256": "b" * 64,
+                    "validationRunId": challenger_report.validation_run_id,
+                },
+            )
+            return rows
+
+        def get_validation(self, validation_run_id):
+            reports = {
+                champion_report.validation_run_id: champion_report,
+                paired_report.validation_run_id: paired_report,
+                challenger_report.validation_run_id: challenger_report,
+            }
+            report = reports[validation_run_id]
+            return {"report": report.to_dict()}
+
+        def champion_summary(self):
+            return {"modelId": "champion", "artifactSha256": "c" * 64, "generation": 1}
+
+    class ShadowOnlyAutonomy:
+        def shadow_summary(self, _model_id, *, policy_sha256=None):
+            return {
+                "settledBuys": 25,
+                "durationDays": 8.0,
+                "netReturn": 0.02,
+                "maxDrawdown": 0.01,
+            }
+
+    registry = CohortRegistry()
+    instance = CodexSupervisor(
+        registry=registry,  # type: ignore[arg-type]
+        autonomy=ShadowOnlyAutonomy(),  # type: ignore[arg-type]
+        audit=FakeAudit(),  # type: ignore[arg-type]
+        promotion_policy=PromotionPolicy(
+            min_folds=1,
+            min_oos_rows=1,
+            min_trades=0,
+            min_round_trip_cost_bps=24,
+            min_aggregate_accuracy=0,
+            min_aggregate_net_return=-1,
+            min_worst_fold_net_return=-0.99,
+            max_drawdown=1,
+        ),
+        autonomy_policy=AutonomyPolicy(),
+    )
+    reviews = instance._model_reviews()
+    paired = next(row for row in reviews if row["modelId"] == "paired-recipe")
+    assert paired["comparisonBaselineModelId"] == "paired-recipe"
+    assert "challenger_oos_improvement_insufficient" in paired["comparisonFailures"]
+
+    challenger = next(
+        row for row in instance._model_reviews() if row["modelId"] == "challenger"
+    )
+    assert "champion_comparison_missing" not in challenger["comparisonFailures"]
+    assert challenger["comparisonBaselineModelId"] == "paired-recipe"
+    assert challenger["comparisonBaselineCohort"] == paired_report.benchmark_cohort_id
+
+    registry.include_paired_recipe = False
+    missing = next(
+        row for row in instance._model_reviews() if row["modelId"] == "challenger"
+    )
+    assert missing["comparisonFailures"] == ["champion_comparison_missing"]
+    assert missing["comparisonBaselineModelId"] is None
+
+
+def test_review_fails_closed_when_the_bound_market_snapshot_is_not_current(tmp_path):
+    report = cohort_report("f", "a")
+
+    class SnapshotRegistry:
+        def list_models(self, limit=100):
+            del limit
+            return [
+                {
+                    "modelId": MODEL_ID,
+                    "artifactSha256": ARTIFACT,
+                    "state": "validated",
+                    "trainer": "test",
+                    "createdAt": NOW.isoformat(),
+                    "trainedThrough": NOW.isoformat(),
+                    "trainedFrom": (NOW - timedelta(days=1)).isoformat(),
+                    "trainingConfigSha256": report.training_config_sha256,
+                    "validationRunId": report.validation_run_id,
+                }
+            ]
+
+        def get_validation(self, validation_run_id):
+            assert validation_run_id == report.validation_run_id
+            return {"report": report.to_dict()}
+
+        def champion_summary(self):
+            return None
+
+    class SnapshotAutonomy:
+        def shadow_summary(self, _model_id, *, policy_sha256=None):
+            return {
+                "settledBuys": 25,
+                "durationDays": 8.0,
+                "netReturn": 0.02,
+                "maxDrawdown": 0.01,
+            }
+
+    instance = CodexSupervisor(
+        registry=SnapshotRegistry(),  # type: ignore[arg-type]
+        autonomy=SnapshotAutonomy(),  # type: ignore[arg-type]
+        audit=FakeAudit(),  # type: ignore[arg-type]
+        promotion_policy=PromotionPolicy(
+            min_folds=1,
+            min_oos_rows=1,
+            min_trades=0,
+            min_round_trip_cost_bps=24,
+            min_aggregate_accuracy=0,
+            min_aggregate_net_return=-1,
+            min_worst_fold_net_return=-0.99,
+            max_drawdown=1,
+        ),
+        autonomy_policy=AutonomyPolicy(),
+        market_snapshot_validator=lambda _sha: False,
+    )
+    review = instance._model_reviews()[0]
+    assert review["deterministicFailures"] == ["market_snapshot_not_current"]

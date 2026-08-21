@@ -13,11 +13,18 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
+from ..sqlite_runtime import configure_sqlite_connection
+
 from .strategy import canonical_json, sha256_hex
 
 
 AUTONOMY_ENABLE_CONFIRMATION = "ENABLE LONG-RUN OKX DEMO"
-AUTONOMY_SCHEMA_VERSION = "tideguard.autonomy.v1"
+LEGACY_AUTONOMY_SCHEMA_VERSIONS = frozenset(
+    {"tideguard.autonomy.v1", "tideguard.autonomy.v2"}
+)
+AUTONOMY_SCHEMA_VERSION = "tideguard.autonomy.v3"
+SHADOW_PROTOCOL_VERSION = "moheng.shadow.next-open-bracket.v2"
+LEGACY_SHADOW_PROTOCOL_VERSION = "moheng.shadow.close-fill.v1"
 SUPERVISOR_ACTOR = "codex-supervisor"
 ACTIVE_POSITION_STATES = frozenset(
     {"entry_submitted", "long", "exit_submitted", "manual_review"}
@@ -245,8 +252,7 @@ class AutonomyStore:
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA foreign_keys=ON")
+        configure_sqlite_connection(db, self.path)
         return db
 
     @contextmanager
@@ -289,7 +295,12 @@ class AutonomyStore:
                     status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
                     model_id TEXT,
                     error_type TEXT,
-                    result_json TEXT
+                    result_json TEXT,
+                    phase TEXT NOT NULL DEFAULT 'syncing',
+                    progress_current INTEGER NOT NULL DEFAULT 0,
+                    progress_total INTEGER,
+                    snapshot_id TEXT,
+                    data_rows INTEGER
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS one_running_training
                 ON training_runs((1)) WHERE status = 'running';
@@ -316,8 +327,14 @@ class AutonomyStore:
                     action TEXT NOT NULL CHECK(action IN ('buy', 'sell', 'hold')),
                     score REAL NOT NULL,
                     entry_close TEXT NOT NULL,
+                    protocol_version TEXT NOT NULL DEFAULT 'moheng.shadow.close-fill.v1',
+                    policy_sha256 TEXT,
+                    entry_open TEXT,
                     exit_close TEXT,
+                    gross_return REAL,
                     net_return REAL,
+                    round_trip_cost_bps REAL,
+                    exit_reason TEXT,
                     settled_at TEXT,
                     UNIQUE(model_id, candle_closed_at)
                 );
@@ -391,6 +408,63 @@ class AutonomyStore:
             }
             if "position_hash" not in position_columns:
                 db.execute("ALTER TABLE positions ADD COLUMN position_hash TEXT")
+            shadow_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(shadow_signals)").fetchall()
+            }
+            for name, declaration in (
+                (
+                    "protocol_version",
+                    "TEXT NOT NULL DEFAULT 'moheng.shadow.close-fill.v1'",
+                ),
+                ("policy_sha256", "TEXT"),
+                ("entry_open", "TEXT"),
+                ("gross_return", "REAL"),
+                ("round_trip_cost_bps", "REAL"),
+                ("exit_reason", "TEXT"),
+            ):
+                if name not in shadow_columns:
+                    db.execute(
+                        f"ALTER TABLE shadow_signals ADD COLUMN {name} {declaration}"
+                    )
+            training_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(training_runs)").fetchall()
+            }
+            for name, declaration in (
+                ("phase", "TEXT NOT NULL DEFAULT 'syncing'"),
+                ("progress_current", "INTEGER NOT NULL DEFAULT 0"),
+                ("progress_total", "INTEGER"),
+                ("snapshot_id", "TEXT"),
+                ("data_rows", "INTEGER"),
+            ):
+                if name not in training_columns:
+                    db.execute(
+                        f"ALTER TABLE training_runs ADD COLUMN {name} {declaration}"
+                    )
+            db.execute(
+                """
+                UPDATE training_runs
+                SET phase = CASE status
+                    WHEN 'completed' THEN 'completed'
+                    WHEN 'failed' THEN 'failed'
+                    ELSE phase
+                END
+                WHERE status IN ('completed', 'failed') AND phase = 'syncing'
+                """
+            )
+            state_schema = db.execute(
+                "SELECT schema_version FROM autonomy_state WHERE singleton = 1"
+            ).fetchone()
+            if state_schema is None:
+                raise AutonomyError("autonomy state is missing")
+            if state_schema["schema_version"] in LEGACY_AUTONOMY_SCHEMA_VERSIONS:
+                db.execute(
+                    "UPDATE autonomy_state SET schema_version = ?, updated_at = ? WHERE singleton = 1",
+                    (AUTONOMY_SCHEMA_VERSION, now),
+                )
+            elif state_schema["schema_version"] != AUTONOMY_SCHEMA_VERSION:
+                raise AutonomyError("autonomy state schema is unsupported")
 
     @staticmethod
     def _position_digest(row: sqlite3.Row) -> str:
@@ -577,12 +651,60 @@ class AutonomyStore:
             db.execute(
                 """
                 INSERT INTO training_runs
-                (run_id, started_at, completed_at, status, model_id, error_type, result_json)
-                VALUES (?, ?, NULL, 'running', NULL, NULL, NULL)
+                (run_id, started_at, completed_at, status, model_id, error_type,
+                 result_json, phase, progress_current, progress_total,
+                 snapshot_id, data_rows)
+                VALUES (?, ?, NULL, 'running', NULL, NULL, NULL,
+                        'syncing', 0, NULL, NULL, NULL)
                 """,
                 (run_id, timestamp),
             )
         return run_id
+
+    def update_training_progress(
+        self,
+        run_id: str,
+        *,
+        phase: str,
+        current: int,
+        total: int | None = None,
+        snapshot_id: str | None = None,
+        data_rows: int | None = None,
+    ) -> None:
+        allowed_phases = {
+            "syncing",
+            "snapshotting",
+            "feature_build",
+            "walk_forward",
+            "final_fit",
+            "registering",
+        }
+        if phase not in allowed_phases:
+            raise AutonomyError("training phase is invalid")
+        if isinstance(current, bool) or current < 0:
+            raise AutonomyError("training progress is invalid")
+        if total is not None and (
+            isinstance(total, bool) or total < 1 or current > total
+        ):
+            raise AutonomyError("training progress total is invalid")
+        if data_rows is not None and (
+            isinstance(data_rows, bool) or data_rows < 1
+        ):
+            raise AutonomyError("training data row count is invalid")
+        with self._lock, self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            updated = db.execute(
+                """
+                UPDATE training_runs
+                SET phase = ?, progress_current = ?, progress_total = ?,
+                    snapshot_id = COALESCE(?, snapshot_id),
+                    data_rows = COALESCE(?, data_rows)
+                WHERE run_id = ? AND status = 'running'
+                """,
+                (phase, current, total, snapshot_id, data_rows, run_id),
+            )
+            if updated.rowcount != 1:
+                raise AutonomyError("training run is not active")
 
     def finish_training(
         self,
@@ -600,10 +722,19 @@ class AutonomyStore:
             updated = db.execute(
                 """
                 UPDATE training_runs
-                SET completed_at = ?, status = ?, model_id = ?, error_type = ?, result_json = ?
+                SET completed_at = ?, status = ?, model_id = ?, error_type = ?,
+                    result_json = ?, phase = ?
                 WHERE run_id = ? AND status = 'running'
                 """,
-                (_iso(now), status, model_id, error_type, payload, run_id),
+                (
+                    _iso(now),
+                    status,
+                    model_id,
+                    error_type,
+                    payload,
+                    "completed" if status == "completed" else "failed",
+                    run_id,
+                ),
             )
             if updated.rowcount != 1:
                 raise AutonomyError("training run is not active")
@@ -622,6 +753,17 @@ class AutonomyStore:
             "status": row["status"],
             "modelId": row["model_id"],
             "errorType": row["error_type"],
+            "phase": row["phase"],
+            "progressCurrent": int(row["progress_current"]),
+            "progressTotal": (
+                int(row["progress_total"])
+                if row["progress_total"] is not None
+                else None
+            ),
+            "snapshotId": row["snapshot_id"],
+            "dataRows": (
+                int(row["data_rows"]) if row["data_rows"] is not None else None
+            ),
             "result": json.loads(row["result_json"]) if row["result_json"] else None,
         }
 
@@ -651,7 +793,8 @@ class AutonomyStore:
             updated = db.execute(
                 """
                 UPDATE training_runs
-                SET completed_at = ?, status = 'failed', error_type = 'ProcessRestart'
+                SET completed_at = ?, status = 'failed', phase = 'failed',
+                    error_type = 'ProcessRestart'
                 WHERE status = 'running'
                 """,
                 (_iso(now),),
@@ -847,16 +990,28 @@ class AutonomyStore:
         action: Literal["buy", "sell", "hold"],
         score: float,
         entry_close: Decimal,
+        policy_sha256: str,
+        round_trip_cost_bps: float,
+        protocol_version: str = SHADOW_PROTOCOL_VERSION,
     ) -> str:
         if action not in {"buy", "sell", "hold"} or not math.isfinite(float(score)):
             raise AutonomyError("shadow signal is invalid")
         _require_sha256(artifact_sha256, "artifact_sha256")
+        _require_sha256(policy_sha256, "policy_sha256")
+        if protocol_version != SHADOW_PROTOCOL_VERSION:
+            raise AutonomyError("shadow protocol is unsupported")
+        if not math.isfinite(round_trip_cost_bps) or round_trip_cost_bps <= 0:
+            raise AutonomyError("round-trip cost is invalid")
+        if _utc(due_at, "due_at") <= _utc(candle_closed_at, "candle_closed_at"):
+            raise AutonomyError("shadow due time must follow the signal")
         entry = _decimal(entry_close, "entry_close", allow_zero=False)
         material = canonical_json(
             {
                 "artifact_sha256": artifact_sha256,
                 "candle_closed_at": _iso(candle_closed_at),
                 "model_id": model_id,
+                "policy_sha256": policy_sha256,
+                "protocol_version": protocol_version,
             }
         )
         signal_id = f"shadow_{sha256_hex(material)[:24]}"
@@ -865,8 +1020,11 @@ class AutonomyStore:
                 """
                 INSERT OR IGNORE INTO shadow_signals
                 (signal_id, model_id, artifact_sha256, candle_closed_at, due_at,
-                 action, score, entry_close, exit_close, net_return, settled_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                 action, score, entry_close, protocol_version, policy_sha256,
+                 entry_open, exit_close, gross_return, net_return,
+                 round_trip_cost_bps, exit_reason, settled_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL,
+                        ?, NULL, NULL)
                 """,
                 (
                     signal_id,
@@ -877,8 +1035,29 @@ class AutonomyStore:
                     action,
                     float(score),
                     str(entry),
+                    protocol_version,
+                    policy_sha256,
+                    float(round_trip_cost_bps),
                 ),
             )
+            row = db.execute(
+                "SELECT * FROM shadow_signals WHERE model_id = ? AND candle_closed_at = ?",
+                (model_id, _iso(candle_closed_at)),
+            ).fetchone()
+            if (
+                row is None
+                or row["signal_id"] != signal_id
+                or row["artifact_sha256"] != artifact_sha256
+                or row["protocol_version"] != protocol_version
+                or row["policy_sha256"] != policy_sha256
+                or row["due_at"] != _iso(due_at)
+                or row["action"] != action
+                or float(row["score"]) != float(score)
+                or _decimal(row["entry_close"], "entry_close", allow_zero=False)
+                != entry
+                or float(row["round_trip_cost_bps"]) != float(round_trip_cost_bps)
+            ):
+                raise AutonomyError("shadow signal conflicts with frozen evidence")
         return signal_id
 
     def unsettled_shadow(self, *, due_at_or_before: datetime) -> list[dict[str, Any]]:
@@ -908,49 +1087,119 @@ class AutonomyStore:
         self,
         signal_id: str,
         *,
-        exit_close: Decimal,
+        entry_open: Decimal,
+        exit_price: Decimal,
         round_trip_cost_bps: float,
+        exit_reason: Literal["stop_loss", "take_profit", "time_exit"],
+        policy_sha256: str,
+        protocol_version: str = SHADOW_PROTOCOL_VERSION,
         now: datetime,
     ) -> None:
-        exit_value = _decimal(exit_close, "exit_close", allow_zero=False)
+        entry_value = _decimal(entry_open, "entry_open", allow_zero=False)
+        exit_value = _decimal(exit_price, "exit_price", allow_zero=False)
         if not math.isfinite(round_trip_cost_bps) or round_trip_cost_bps <= 0:
             raise AutonomyError("round-trip cost is invalid")
+        if exit_reason not in {"stop_loss", "take_profit", "time_exit"}:
+            raise AutonomyError("shadow exit reason is invalid")
+        _require_sha256(policy_sha256, "policy_sha256")
+        if protocol_version != SHADOW_PROTOCOL_VERSION:
+            raise AutonomyError("shadow protocol is unsupported")
         with self._lock, self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT entry_close, action FROM shadow_signals WHERE signal_id = ?",
+                "SELECT action, protocol_version, policy_sha256, round_trip_cost_bps FROM shadow_signals WHERE signal_id = ?",
                 (signal_id,),
             ).fetchone()
             if row is None:
                 raise AutonomyError("shadow signal does not exist")
-            entry = _decimal(row["entry_close"], "entry_close", allow_zero=False)
-            net_return = (
-                float(exit_value / entry - Decimal("1")) - round_trip_cost_bps / 10_000.0
-                if row["action"] == "buy"
-                else 0.0
-            )
+            if (
+                row["protocol_version"] != protocol_version
+                or row["policy_sha256"] != policy_sha256
+                or float(row["round_trip_cost_bps"]) != float(round_trip_cost_bps)
+            ):
+                raise AutonomyError("shadow settlement does not match frozen policy")
+            if row["action"] == "buy":
+                per_side_cost = Decimal(str(round_trip_cost_bps)) / Decimal("20000")
+                gross_return = float(exit_value / entry_value - Decimal("1"))
+                net_return = float(
+                    (exit_value * (Decimal("1") - per_side_cost))
+                    / (entry_value * (Decimal("1") + per_side_cost))
+                    - Decimal("1")
+                )
+            else:
+                gross_return = 0.0
+                net_return = 0.0
             updated = db.execute(
                 """
                 UPDATE shadow_signals
-                SET exit_close = ?, net_return = ?, settled_at = ?
+                SET entry_open = ?, exit_close = ?, gross_return = ?, net_return = ?,
+                    round_trip_cost_bps = ?, exit_reason = ?, settled_at = ?
                 WHERE signal_id = ? AND settled_at IS NULL
                 """,
-                (str(exit_value), net_return, _iso(now), signal_id),
+                (
+                    str(entry_value),
+                    str(exit_value),
+                    gross_return,
+                    net_return,
+                    float(round_trip_cost_bps),
+                    exit_reason,
+                    _iso(now),
+                    signal_id,
+                ),
             )
             if updated.rowcount != 1:
                 raise AutonomyError("shadow signal is already settled")
 
-    def shadow_summary(self, model_id: str) -> dict[str, Any]:
+    def exclude_legacy_shadow(self, signal_id: str, *, now: datetime) -> None:
+        with self._lock, self._connection() as db:
+            updated = db.execute(
+                """
+                UPDATE shadow_signals
+                SET gross_return = 0.0, net_return = 0.0,
+                    exit_reason = 'legacy_protocol_excluded', settled_at = ?
+                WHERE signal_id = ? AND settled_at IS NULL
+                  AND protocol_version <> ?
+                """,
+                (_iso(now), signal_id, SHADOW_PROTOCOL_VERSION),
+            )
+            if updated.rowcount != 1:
+                raise AutonomyError("legacy shadow signal cannot be excluded")
+
+    def shadow_summary(
+        self, model_id: str, *, policy_sha256: str | None = None
+    ) -> dict[str, Any]:
+        if policy_sha256 is not None:
+            _require_sha256(policy_sha256, "policy_sha256")
         with self._connection() as db:
             rows = db.execute(
                 """
                 SELECT action, net_return, candle_closed_at, settled_at
                 FROM shadow_signals
                 WHERE model_id = ? AND settled_at IS NOT NULL
+                  AND protocol_version = ?
+                  AND (? IS NULL OR policy_sha256 = ?)
                 ORDER BY candle_closed_at ASC
                 """,
-                (model_id,),
+                (
+                    model_id,
+                    SHADOW_PROTOCOL_VERSION,
+                    policy_sha256,
+                    policy_sha256,
+                ),
             ).fetchall()
+            excluded = db.execute(
+                """
+                SELECT COUNT(*) AS total FROM shadow_signals
+                WHERE model_id = ? AND settled_at IS NOT NULL
+                  AND (protocol_version <> ? OR (? IS NOT NULL AND policy_sha256 <> ?))
+                """,
+                (
+                    model_id,
+                    SHADOW_PROTOCOL_VERSION,
+                    policy_sha256,
+                    policy_sha256,
+                ),
+            ).fetchone()
         returns = [float(row["net_return"]) for row in rows if row["action"] == "buy"]
         equity = 1.0
         peak = 1.0
@@ -977,6 +1226,9 @@ class AutonomyStore:
             "durationDays": duration_days,
             "firstSignalAt": first,
             "lastSettledAt": last,
+            "protocolVersion": SHADOW_PROTOCOL_VERSION,
+            "policySha256": policy_sha256,
+            "excludedLegacyOrPolicyMismatch": int(excluded["total"] if excluded else 0),
         }
 
     def claim_daily_entry(self, *, now: datetime, maximum: int) -> int:

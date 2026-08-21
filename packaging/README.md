@@ -1,6 +1,7 @@
 # Windows desktop packaging
 
-Tideguard uses a deliberately small Windows desktop shell:
+墨衡 MOHENG uses a deliberately small Windows desktop shell while retaining
+the internal Tideguard AppId, data directory and executable name for safe upgrades:
 
 - PyInstaller creates a windowed (`console=False`) **onedir** application.
 - The launcher exclusively reserves `127.0.0.1:8791`, passes that already-bound
@@ -39,9 +40,9 @@ The script installs the pinned desktop extras, performs a frozen-resource
 self-test, rejects credential/local-state filenames, verifies the Microsoft
 Authenticode signature on the WebView2 bootstrapper, and writes:
 
-- `release/Tideguard-<version>-windows-x64.zip`
-- `release/Tideguard-Setup-<version>.exe`
-- `release/Tideguard-<version>-manifest.json`
+- `release/Moheng-<version>-windows-x64.zip`
+- `release/Moheng-Setup-<version>.exe`
+- `release/Moheng-<version>-manifest.json`
 - `release/SHA256SUMS.txt`
 
 Use `-SkipInstaller` when validating a portable build on a machine without Inno
@@ -64,14 +65,16 @@ uv pip compile packaging\build-requirements.in --python-version 3.11 `
 
 ## Credential and uninstall boundary
 
-The PyInstaller specification includes only `frontend/dist` as application
-data. It does not collect `.env` files, SQLite state, release credentials, or
+The PyInstaller specification includes only `frontend/dist` and the reviewed
+`assets/brand` PNG/ICO files as application data. It does not collect `.env`
+files, SQLite state, release credentials, or
 Windows Credential Manager entries. Runtime API credentials remain in Windows
-Credential Manager under the existing Tideguard service name.
+Credential Manager under the separate `Tideguard.OKX.Demo` and
+`Tideguard.OKX.Live` service names.
 
-The installer adds **Tideguard 凭证管理** to the Start menu. It launches the
+The installer adds **墨衡凭证管理** to the Start menu. It launches the
 same windowed executable with `--credentials`, so a clean Windows installation
-can set or delete Demo credentials without Python, a console, or a plaintext
+can set or delete independently isolated Demo/Live credentials without Python, a console, or a plaintext
 file. This small isolated window never returns stored credential values to its
 HTML; it only reports configured/not configured status.
 
@@ -90,8 +93,8 @@ application's existing credential workflow.
 Push an annotated semantic-version tag after the normal `main` checks pass:
 
 ```powershell
-git tag -a v0.3.0 -m "Tideguard v0.3.0"
-git push origin v0.3.0
+git tag -a v0.4.0 -m "墨衡 MOHENG v0.4.0"
+git push origin v0.4.0
 ```
 
 `.github/workflows/release.yml` validates the tag, rebuilds from the lockfile,
@@ -108,6 +111,6 @@ password in the repository or PyInstaller data list.
 ## Silent install and uninstall
 
 ```powershell
-.\Tideguard-Setup-0.3.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+.\Moheng-Setup-0.4.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 & "$env:LOCALAPPDATA\Programs\Tideguard\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```

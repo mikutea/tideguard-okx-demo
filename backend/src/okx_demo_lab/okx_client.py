@@ -7,7 +7,7 @@ import hmac
 import json
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 from urllib.parse import urlencode
 
 import httpx
@@ -17,9 +17,9 @@ from .config import (
     ALLOWED_PRIVATE_ENDPOINTS,
     ALLOWED_PUBLIC_ENDPOINTS,
     OKX_BASE_URL,
-    POLICY,
-    SIMULATED_HEADER,
+    policy_for_profile,
 )
+from .profile import DEMO_PROFILE, EnvironmentProfile
 from .secrets import Credentials, credential_fingerprint, get_credentials
 
 
@@ -50,16 +50,21 @@ class OkxClient:
     def __init__(
         self,
         *,
-        credentials_provider: Callable[[], Credentials | None] = get_credentials,
+        profile: EnvironmentProfile = DEMO_PROFILE,
+        credentials_provider: Callable[[], Credentials | None] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         history_page_delay_seconds: float | None = None,
     ):
-        self._credentials_provider = credentials_provider
+        self.profile = profile
+        self.policy = policy_for_profile(profile)
+        self._credentials_provider = credentials_provider or (
+            lambda: get_credentials(self.profile)
+        )
         self._client = httpx.AsyncClient(
             base_url=OKX_BASE_URL,
             timeout=httpx.Timeout(8.0, connect=5.0),
             transport=transport,
-            headers={"User-Agent": "Tideguard/0.3 demo-only"},
+            headers={"User-Agent": f"Tideguard/0.4 {profile.name}"},
         )
         self._history_page_delay_seconds = (
             0.0
@@ -76,13 +81,15 @@ class OkxClient:
         try:
             return self._credentials_provider()
         except Exception as exc:
-            raise CredentialIdentityError("无法从原生凭证库读取模拟盘凭证") from exc
+            raise CredentialIdentityError(
+                f"无法从原生凭证库读取{self.profile.display_name}凭证"
+            ) from exc
 
     def current_credential_fingerprint(self) -> str:
         credentials = self._load_credentials()
         if credentials is None:
-            raise CredentialIdentityError("模拟盘凭证不可用")
-        return credential_fingerprint(credentials)
+            raise CredentialIdentityError(f"{self.profile.display_name}凭证不可用")
+        return credential_fingerprint(credentials, self.profile)
 
     @staticmethod
     def sign(
@@ -143,10 +150,11 @@ class OkxClient:
         if path not in ALLOWED_PUBLIC_ENDPOINTS:
             raise OkxClientError("公共 API 路径不在白名单")
         request_path = self._request_path(path, params)
-        response = await self._client.get(
-            request_path,
-            headers={"x-simulated-trading": SIMULATED_HEADER},
-        )
+        # Public market data is shared research input, not a Demo/Live account
+        # operation.  Sending x-simulated-trading here silently truncates OKX
+        # history on the Demo route, so public requests intentionally carry no
+        # environment-specific private headers.
+        response = await self._client.get(request_path)
         response.raise_for_status()
         return self._validate_envelope(
             response.json(),
@@ -170,12 +178,16 @@ class OkxClient:
             raise OkxClientError("私有 API 路径不在白名单")
         credentials = self._load_credentials()
         if credentials is None:
-            raise OkxClientError("尚未在 Windows Credential Manager 配置凭证")
-        current_fingerprint = credential_fingerprint(credentials)
+            raise OkxClientError(
+                f"尚未在 Windows Credential Manager 配置{self.profile.display_name}凭证"
+            )
+        current_fingerprint = credential_fingerprint(credentials, self.profile)
         if expected_credential_fingerprint and not hmac.compare_digest(
             current_fingerprint, expected_credential_fingerprint
         ):
-            raise CredentialIdentityError("模拟盘凭证身份已变化，操作被拒绝")
+            raise CredentialIdentityError(
+                f"{self.profile.display_name}凭证身份已变化，操作被拒绝"
+            )
 
         request_path = self._request_path(path, params)
         body_text = json.dumps(body, separators=(",", ":"), ensure_ascii=False) if body else ""
@@ -188,11 +200,11 @@ class OkxClient:
             ),
             "OK-ACCESS-PASSPHRASE": credentials.passphrase,
             "OK-ACCESS-TIMESTAMP": timestamp,
-            "x-simulated-trading": SIMULATED_HEADER,
+            **self.profile.private_headers,
         }
         if order_dispatch:
             now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-            headers["expTime"] = str(now_ms + POLICY.request_expiry_ms)
+            headers["expTime"] = str(now_ms + self.policy.request_expiry_ms)
         try:
             if order_dispatch and dispatch_guard:
                 dispatch_guard()
@@ -260,12 +272,123 @@ class OkxClient:
             raise OkxClientError("OKX 行情缺少有效时间戳")
         ticker_timestamp = int(ticker_timestamp_text)
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        if ticker_timestamp <= 0 or ticker_timestamp > now_ms + POLICY.request_expiry_ms:
+        if (
+            ticker_timestamp <= 0
+            or ticker_timestamp > now_ms + self.policy.request_expiry_ms
+        ):
             raise OkxClientError("OKX 行情时间戳无效或来自未来")
         instrument = instruments[0]
         if instrument.get("instType") != "SPOT" or instrument.get("instId") != inst_id:
             raise OkxClientError("交易品种未被 OKX 确认为 SPOT")
         return {"ticker": ticker[0], "candles": candles, "instrument": instrument}
+
+    async def _request_history_candle_page(
+        self,
+        *,
+        inst_id: str,
+        bar: str,
+        after: int | None,
+        page_limit: int,
+    ) -> list[list[Any]]:
+        params = {"instId": inst_id, "bar": bar, "limit": str(page_limit)}
+        if after is not None:
+            params["after"] = str(after)
+        last_error: BaseException | None = None
+        for attempt in range(5):
+            try:
+                page = await self.public_get("/api/v5/market/history-candles", params)
+                return [list(row) for row in page]
+            except OkxApiError as exc:
+                last_error = exc
+                retryable = exc.code == "50011"
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                retryable = exc.response.status_code == 429 or exc.response.status_code >= 500
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                last_error = exc
+                retryable = True
+            if not retryable:
+                raise last_error
+            if attempt == 4:
+                break
+            delay = min(
+                max(self._history_page_delay_seconds, 0.1) * (2**attempt),
+                5.0,
+            )
+            if self._history_page_delay_seconds == 0:
+                delay = 0
+            if delay:
+                await asyncio.sleep(delay)
+        raise OkxClientError("OKX 历史 K 线分页重试已耗尽") from last_error
+
+    async def iter_history_candle_pages(
+        self,
+        inst_id: str = "BTC-USDT",
+        *,
+        bar: str = "5m",
+        after: int | None = None,
+        page_limit: int = 300,
+    ) -> AsyncIterator[tuple[list[list[Any]], int | None]]:
+        """Yield public history pages with a strictly decreasing cursor.
+
+        A terminal empty page is yielded only after three independent empty
+        responses at the same cursor.  OKX can occasionally return an empty
+        successful envelope mid-history, so one empty response must never mark a
+        durable backfill complete.  A short non-empty page is never treated as the
+        end because regional OKX services may cap the documented 300-row request
+        at 100 rows.
+        """
+
+        if inst_id not in ALLOWED_INSTRUMENTS or bar != "5m":
+            raise OkxClientError("模型训练只允许 BTC-USDT 的 5m 公共 K 线")
+        if not 1 <= page_limit <= 300:
+            raise OkxClientError("OKX 历史 K 线分页数量必须在 1–300 之间")
+        if after is not None and (isinstance(after, bool) or after <= 0):
+            raise OkxClientError("OKX 历史 K 线分页游标无效")
+
+        cursor = after
+        pages_seen = 0
+        consecutive_empty_pages = 0
+        while True:
+            if pages_seen >= 20_000:
+                raise OkxClientError("OKX 历史 K 线分页超过安全上限")
+            page = await self._request_history_candle_page(
+                inst_id=inst_id,
+                bar=bar,
+                after=cursor,
+                page_limit=page_limit,
+            )
+            if not page:
+                consecutive_empty_pages += 1
+                if consecutive_empty_pages >= 3:
+                    yield [], cursor
+                    return
+                delay = max(self._history_page_delay_seconds, 0.5) * (
+                    2 ** (consecutive_empty_pages - 1)
+                )
+                if self._history_page_delay_seconds == 0:
+                    delay = 0
+                if delay:
+                    await asyncio.sleep(min(delay, 2.0))
+                continue
+            consecutive_empty_pages = 0
+            pages_seen += 1
+            timestamps: list[int] = []
+            for row in page:
+                timestamp_text = str(row[0]).strip()
+                if not timestamp_text.isdigit():
+                    raise OkxClientError("OKX 历史 K 线包含无效时间戳")
+                timestamp = int(timestamp_text)
+                if timestamp <= 0:
+                    raise OkxClientError("OKX 历史 K 线包含无效时间戳")
+                timestamps.append(timestamp)
+            next_cursor = min(timestamps)
+            if cursor is not None and next_cursor >= cursor:
+                raise OkxClientError("OKX 历史 K 线分页游标未严格递减")
+            yield page, next_cursor
+            cursor = next_cursor
+            if self._history_page_delay_seconds:
+                await asyncio.sleep(self._history_page_delay_seconds)
 
     async def get_history_candles(
         self,
@@ -280,34 +403,20 @@ class OkxClient:
             raise OkxClientError("模型训练 K 线数量必须在 300–20000 之间")
 
         rows_by_timestamp: dict[int, list[Any]] = {}
-        after: str | None = None
-        while len(rows_by_timestamp) < limit:
-            page_size = min(100, limit - len(rows_by_timestamp))
-            params = {"instId": inst_id, "bar": bar, "limit": str(page_size)}
-            if after:
-                params["after"] = after
-            page = await self.public_get("/api/v5/market/history-candles", params)
+        async for page, _next_cursor in self.iter_history_candle_pages(
+            inst_id=inst_id,
+            bar=bar,
+            page_limit=100,
+        ):
             if not page:
                 break
-
-            timestamps: list[int] = []
             for row in page:
                 timestamp_text = str(row[0]).strip()
-                if not timestamp_text.isdigit():
-                    raise OkxClientError("OKX 历史 K 线包含无效时间戳")
                 timestamp = int(timestamp_text)
-                timestamps.append(timestamp)
                 if str(row[8]) == "1":
                     rows_by_timestamp[timestamp] = row
-
-            next_after = str(min(timestamps))
-            if next_after == after:
-                raise OkxClientError("OKX 历史 K 线分页游标未前进")
-            after = next_after
-            if len(page) < page_size:
+            if len(rows_by_timestamp) >= limit:
                 break
-            if len(rows_by_timestamp) < limit and self._history_page_delay_seconds:
-                await asyncio.sleep(self._history_page_delay_seconds)
 
         return [rows_by_timestamp[key] for key in sorted(rows_by_timestamp)][-limit:]
 
@@ -331,15 +440,26 @@ class OkxClient:
 
     async def get_pending_orders(
         self,
-        inst_id: str = "BTC-USDT",
+        inst_id: str | None = "BTC-USDT",
         *,
         expected_credential_fingerprint: str | None = None,
     ) -> list[dict[str, Any]]:
+        """Return a complete, fail-closed view of pending SPOT orders.
+
+        Passing ``None`` intentionally omits ``instId`` so callers enforcing an
+        account-level safety boundary can see every pending SPOT order, not only
+        BTC-USDT.  A full page at the local safety cap is treated as incomplete
+        rather than silently returning a partial snapshot.
+        """
+
         orders: list[dict[str, Any]] = []
         seen_order_ids: set[str] = set()
         after: str | None = None
-        for _ in range(5):
-            params = {"instType": "SPOT", "instId": inst_id, "limit": "100"}
+        max_pages = 100
+        for _ in range(max_pages):
+            params = {"instType": "SPOT", "limit": "100"}
+            if inst_id is not None:
+                params["instId"] = inst_id
             if after:
                 params["after"] = after
             page = await self.private_request(
@@ -360,7 +480,7 @@ class OkxClient:
             if not cursor or cursor == after:
                 raise OkxClientError("OKX 挂单分页游标无效")
             after = cursor
-        return orders
+        raise OkxClientError("OKX 挂单超过分页安全上限，无法证明列表完整")
 
     async def get_order(
         self,
@@ -396,7 +516,7 @@ class OkxClient:
             "px": price,
             "sz": size,
             "clOrdId": cl_ord_id,
-            "tag": "tideguarddemo",
+            "tag": self.profile.order_tag,
         }
         data = await self.private_request(
             "POST",
@@ -420,7 +540,7 @@ class OkxClient:
             raise AmbiguousOrderError("OKX 接受响应缺少 ordId，必须按 clOrdId 回查")
         if str(item.get("clOrdId", "")).strip() != cl_ord_id:
             raise AmbiguousOrderError("OKX 下单响应 clOrdId 不匹配，必须回查")
-        if str(item.get("tag", "")) != "tideguarddemo":
+        if str(item.get("tag", "")) != self.profile.order_tag:
             raise AmbiguousOrderError("OKX 下单响应 tag 不匹配，必须回查")
         return item
 
@@ -459,14 +579,14 @@ class OkxClient:
         data = await self.private_request(
             "POST",
             "/api/v5/trade/cancel-all-after",
-            body={"timeOut": str(seconds), "tag": "tideguarddemo"},
+            body={"timeOut": str(seconds), "tag": self.profile.order_tag},
             expected_credential_fingerprint=expected_credential_fingerprint,
         )
         response_received_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         if not data:
             raise OkxClientError("OKX 未确认 Cancel-All-After")
         item = data[0]
-        if str(item.get("tag", "")) != "tideguarddemo":
+        if str(item.get("tag", "")) != self.profile.order_tag:
             raise OkxClientError("OKX CAA 响应 tag 不匹配")
         trigger_text = str(item.get("triggerTime", "")).strip()
         if not trigger_text.isdigit():
@@ -484,8 +604,8 @@ class OkxClient:
                 raise OkxClientError("OKX CAA 响应倒计时与请求不一致")
         timestamp_ms = timestamp if timestamp >= 1_000_000_000_000 else timestamp * 1_000
         if not (
-            request_started_ms - POLICY.request_expiry_ms
+            request_started_ms - self.policy.request_expiry_ms
             <= timestamp_ms
-            <= response_received_ms + POLICY.request_expiry_ms
+            <= response_received_ms + self.policy.request_expiry_ms
         ):
             raise OkxClientError("OKX CAA 响应 ts 不在当前请求时间窗口")

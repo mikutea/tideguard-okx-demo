@@ -1,0 +1,285 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "墨衡 V4 已退役语义失配历史诊断",
+    "description": "RETIRED：旧数值仅用于审计额外一根 K 线延迟，不是 canonical、V6 对照或晋级证据。",
+    "generatedAt": "2026-08-21T18:19:42.110Z",
+    "cards": [
+      {
+        "id": "ordinary_net_card",
+        "description": "840 天开发回放在 24 bps 往返成本后的虚拟资金净收益；V3 是同一冻结 cohort 上的比较基线。",
+        "dataset": "headline",
+        "sourceId": "v4_replay",
+        "metrics": [
+          { "label": "V4 历史开发净收益", "field": "ordinaryNetReturn", "format": "percent", "signed": true },
+          { "label": "V3 基线", "field": "v3NetReturn", "format": "percent", "signed": true }
+        ]
+      },
+      {
+        "id": "stress_net_card",
+        "description": "同一固定策略在 48 bps 往返成本下的净收益；接近零意味着成本稳健余量仍薄。",
+        "dataset": "headline",
+        "sourceId": "v4_replay",
+        "metrics": [
+          { "label": "48 bps 压力净收益", "field": "stressNetReturn", "format": "percent", "signed": true }
+        ]
+      },
+      {
+        "id": "drawdown_card",
+        "description": "逐 5 分钟虚拟权益相对此前峰值的最大跌幅。",
+        "dataset": "headline",
+        "sourceId": "v4_replay",
+        "metrics": [
+          { "label": "最大回撤", "field": "maxDrawdown", "format": "percent" }
+        ]
+      },
+      {
+        "id": "trades_card",
+        "description": "闭环交易数及成本后盈利交易占比；63 笔按历史报价成交量容量缩小仓位。",
+        "dataset": "headline",
+        "sourceId": "v4_replay",
+        "metrics": [
+          { "label": "闭环交易", "field": "trades", "format": "number" },
+          { "label": "盈利交易率", "field": "profitableTradeRate", "format": "percent" }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "version_cost_chart",
+        "title": "V3 与 V4 成本后净收益",
+        "subtitle": "同一冻结多资产 cohort；V4 普通成本转正，但 48 bps 压力结果仅略高于零",
+        "type": "bar",
+        "dataset": "versionCostComparison",
+        "sourceId": "version_comparison",
+        "valueFormat": "percent",
+        "layout": "full",
+        "encodings": {
+          "x": { "field": "version", "type": "nominal", "label": "研究版本" },
+          "y": { "field": "netReturn", "type": "quantitative", "label": "净收益", "format": "percent" },
+          "color": { "field": "costScenario", "type": "nominal", "label": "成本情景" },
+          "tooltip": [
+            { "field": "trades", "type": "quantitative", "label": "闭环交易" },
+            { "field": "maxDrawdown", "type": "quantitative", "label": "最大回撤", "format": "percent" },
+            { "field": "targetAligned", "type": "text", "label": "后续语义审计" }
+          ]
+        }
+      },
+      {
+        "id": "asset_pnl_chart",
+        "title": "V4 各资产净盈亏贡献",
+        "subtitle": "840 天、24 bps 往返成本；正收益主要来自 XRP 和 DOGE，PEPE 为最大负贡献",
+        "type": "bar",
+        "dataset": "assetContribution",
+        "sourceId": "v4_replay",
+        "valueFormat": "currency",
+        "layout": "full",
+        "encodings": {
+          "x": { "field": "instrument", "type": "nominal", "label": "研究资产" },
+          "y": { "field": "netPnl", "type": "quantitative", "label": "净盈亏（USDT）", "format": "currency" },
+          "tooltip": [
+            { "field": "trades", "type": "quantitative", "label": "交易数" },
+            { "field": "netPnlShare", "type": "quantitative", "label": "占组合净收益", "format": "percent" }
+          ]
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "policy_sensitivity_table",
+        "title": "固定策略周边敏感性",
+        "subtitle": "同一已观察开发历史上的 6 个预列组合；用于检查局部稳定性，不构成封存 OOS",
+        "dataset": "policySensitivity",
+        "sourceId": "v4_replay",
+        "defaultSort": { "field": "netReturn", "direction": "desc" },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          { "field": "policy", "label": "成本缓冲 / 间隔", "type": "text" },
+          { "field": "netReturn", "label": "净收益", "format": "percent", "movement": true },
+          { "field": "grossReturn", "label": "毛收益", "format": "percent", "movement": true },
+          { "field": "maxDrawdown", "label": "最大回撤", "format": "percent" },
+          { "field": "trades", "label": "交易数", "format": "number" },
+          { "field": "profitableTradeRate", "label": "盈利交易率", "format": "percent" },
+          { "field": "gate", "label": "开发门槛", "type": "text" }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "v4_replay",
+        "label": "Retired V4 semantic-mismatch replay",
+        "path": ".research-data/replays/historical-replay-v4-20260821T181600Z.json"
+      },
+      {
+        "id": "version_comparison",
+        "label": "Retired V3/V4 historical comparison",
+        "path": "docs/reports/v4-profitability/source-notes.md"
+      }
+    ],
+    "blocks": [
+      { "id": "title", "type": "markdown", "body": "# 墨衡 V4 已退役语义失配历史诊断\n\n> **RETIRED：V4 在已经对齐的确认收盘/下一开盘边界后又等待一根 K 线。以下旧数值只用于失配审计，不是 canonical、V6 对照或晋级证据。**" },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "sourceId": "v4_replay",
+        "body": "## 技术摘要\n\n- **V4 旧账本在已观察历史上记录为正。** 24 bps 往返成本后为 **+12.01%**，48 bps 压力成本后为 **+0.60%**；172 笔闭环交易。\n- **后续审计否定了其执行对齐声明。** 特征时间戳已经位于确认收盘/下一开盘共同边界，V4 又施加一根延迟，所以上述交易与收益不是 V6 目标合同结果。\n- **本材料已退役。** 不得用于模型晋级、Shadow 计时、Demo/Live 决策，也不得与 V6 直接拼接。"
+      },
+      { "id": "headline_metrics", "type": "metric-strip", "cardIds": ["ordinary_net_card", "stress_net_card", "drawdown_card", "trades_card"] },
+      {
+        "id": "target_alignment_finding",
+        "type": "markdown",
+        "sourceId": "version_comparison",
+        "body": "## 当时声称的对齐后来被证伪\n\nV3 的预测目标与实际退出方式不一致；V4 当时声称统一了标签、成交延迟、持有期和费用口径。后续逐时钟审计发现 V4 在已对齐边界后额外等待一根 K 线，因此图表只能比较两个已退役历史合同，不能说明 V6 收益改善。"
+      },
+      { "id": "version_cost_visual", "type": "chart", "chartId": "version_cost_chart" },
+      {
+        "id": "asset_concentration_finding",
+        "type": "markdown",
+        "sourceId": "v4_replay",
+        "body": "## 正收益存在明显资产集中\n\nXRP 与 DOGE 分别贡献约 +879 和 +418 USDT，合计超过组合总净利润；PEPE 贡献约 -207 USDT。资产贡献可以互相抵消，因此总收益为正不代表每个资产上的模型都有效。当前不依据这段已观察历史事后删除 PEPE，以免把幸存者选择写进策略。"
+      },
+      { "id": "asset_pnl_visual", "type": "chart", "chartId": "asset_pnl_chart" },
+      {
+        "id": "episode_concentration_finding",
+        "type": "markdown",
+        "sourceId": "v4_replay",
+        "body": "## 周期结果支持方向性，但稳定性仍不足\n\n28 个 30 天周期中只有 15 个发生交易；有交易周期为 8 正、7 负。最佳两个周期合计贡献约 1,010 USDT，接近总净利润的 84%。这说明结果对特定市场阶段依赖较强，最近若干周期也不能被早期高收益掩盖。"
+      },
+      {
+        "id": "scope_definitions",
+        "type": "markdown",
+        "body": "## 范围、数据与指标定义\n\n研究使用 OKX 官方公共确认 5 分钟 K 线冻结 cohort，包含 BTC、ETH、XRP、SOL、DOGE、PEPE、SUI 对 USDT；回放窗口为 2024-05-02 至 2026-08-20，共 840 天。净收益是虚拟现金账本期末权益相对 10,000 USDT 初始现金的变化，包含双边费用与滑点。最大回撤按逐 5 分钟虚拟权益相对此前峰值计算。历史多资产研究不扩大执行白名单，Shadow 天数仍为 0。"
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "sourceId": "v4_replay",
+        "body": "## 方法与固定模型规格\n\n每代使用 365 天滚动训练窗，末 30 天隔离校准，标签结果与下一代回放之间保留 14 根清除/禁运间隔；每 30 天重训一次。模型固定为低复杂度、固定随机种子的 HistGradientBoostingClassifier（100 轮、15 个叶节点、最小叶样本 200、L2=2）。策略固定为 72 bps 额外边际和 12 根最短入场间隔。若目标仓位超过历史 5 分钟报价成交量的 0.5%，账本缩小到容量而非整笔拒绝；V4 有 63 笔缩量、0 笔拒绝。"
+      },
+      { "id": "policy_sensitivity", "type": "table", "tableId": "policy_sensitivity_table" },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## 限制、不确定性与退役结论\n\n- **总体判断：只保留为语义失配审计材料。** 旧门槛通过状态已被后续时钟审计推翻。\n- **执行语义失配。** 额外一根延迟使交易、费用、回撤和收益均不能代表 V6 合同。\n- **选择偏差仍在。** 策略和局部敏感性均来自同一已观察历史，没有新的封存样本。\n- **成交模型不完整。** 历史 OHLCV 无订单簿、队列位置和真实账户费率。\n- **组合贡献集中。** 总收益依赖 XRP、DOGE 和少数周期，不能外推未来。"
+      },
+      {
+        "id": "recommended_next_steps",
+        "type": "markdown",
+        "body": "## 建议的下一步\n\n1. 冻结 V4 模型规格、72 bps 策略和风险上限，停止在这段历史上继续挑最高收益参数。\n2. 启动至少 90 天公共多资产 Shadow，只记录按当时可见数据生成的信号、理论成交、容量缩量和成本压力结果。\n3. 预先登记失败条件：48 bps 前瞻净收益不为正、最大回撤超过 10%、任一资产交易占比超过 60%、数据/时间戳完整性失败。\n4. Shadow 完成后由 Codex 复核证据；无论结果如何，不自动改源码、执行白名单、资金上限或正式盘权限。"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## 仍需回答的问题\n\n- 前瞻期的真实可成交费率与滑点是否会高于 48 bps 压力假设？\n- XRP/DOGE 的贡献是否在新市场状态中延续，还是只属于历史阶段？\n- 63 笔容量缩量在逐笔订单簿数据下是否仍可成交？\n- 未来是否能在不扩大执行权限的前提下，增加按资产预注册的可靠性门？"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-21T18:19:42.110Z",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {
+          "ordinaryNetReturn": 0.12005627052512424,
+          "v3NetReturn": -0.018355488507282636,
+          "stressNetReturn": 0.006030410517849472,
+          "maxDrawdown": 0.08177585844380866,
+          "trades": 172,
+          "profitableTradeRate": 0.5697674418604651
+        }
+      ],
+      "versionCostComparison": [
+        { "version": "V3", "costScenario": "24 bps 普通", "netReturn": -0.018355488507282636, "trades": 36, "maxDrawdown": 0.054580379521292834, "targetAligned": "否" },
+        { "version": "V3", "costScenario": "48 bps 压力", "netReturn": -0.03863816890319671, "trades": 23, "maxDrawdown": 0.0622893742175287, "targetAligned": "否" },
+        { "version": "V4", "costScenario": "24 bps 普通", "netReturn": 0.12005627052512424, "trades": 172, "maxDrawdown": 0.08177585844380866, "targetAligned": "失配；已退役" },
+        { "version": "V4", "costScenario": "48 bps 压力", "netReturn": 0.006030410517849472, "trades": 123, "maxDrawdown": 0.0834595573325371, "targetAligned": "失配；已退役" }
+      ],
+      "assetContribution": [
+        { "instrument": "XRP-USDT", "netPnl": 879.19, "trades": 39, "netPnlShare": 0.73232 },
+        { "instrument": "DOGE-USDT", "netPnl": 418.23, "trades": 21, "netPnlShare": 0.34836 },
+        { "instrument": "BTC-USDT", "netPnl": 60.53, "trades": 4, "netPnlShare": 0.05042 },
+        { "instrument": "ETH-USDT", "netPnl": 57.51, "trades": 10, "netPnlShare": 0.04790 },
+        { "instrument": "SUI-USDT", "netPnl": 43.74, "trades": 26, "netPnlShare": 0.03643 },
+        { "instrument": "SOL-USDT", "netPnl": -51.99, "trades": 5, "netPnlShare": -0.04330 },
+        { "instrument": "PEPE-USDT", "netPnl": -206.64, "trades": 67, "netPnlShare": -0.17212 }
+      ],
+      "episodeContribution": [
+        { "episode": 1, "replayStart": "2024-05-02", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 2, "replayStart": "2024-06-01", "trades": 7, "netPnl": 126.30, "activeOutcome": "正" },
+        { "episode": 3, "replayStart": "2024-07-01", "trades": 4, "netPnl": -154.12, "activeOutcome": "负" },
+        { "episode": 4, "replayStart": "2024-07-31", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 5, "replayStart": "2024-08-30", "trades": 1, "netPnl": 56.63, "activeOutcome": "正" },
+        { "episode": 6, "replayStart": "2024-09-29", "trades": 24, "netPnl": -60.19, "activeOutcome": "负" },
+        { "episode": 7, "replayStart": "2024-10-29", "trades": 28, "netPnl": 384.07, "activeOutcome": "正" },
+        { "episode": 8, "replayStart": "2024-11-28", "trades": 39, "netPnl": 625.52, "activeOutcome": "正" },
+        { "episode": 9, "replayStart": "2024-12-28", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 10, "replayStart": "2025-01-27", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 11, "replayStart": "2025-02-26", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 12, "replayStart": "2025-03-28", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 13, "replayStart": "2025-04-27", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 14, "replayStart": "2025-05-27", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 15, "replayStart": "2025-06-26", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 16, "replayStart": "2025-07-26", "trades": 4, "netPnl": 5.55, "activeOutcome": "正" },
+        { "episode": 17, "replayStart": "2025-08-25", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 18, "replayStart": "2025-09-24", "trades": 8, "netPnl": 193.18, "activeOutcome": "正" },
+        { "episode": 19, "replayStart": "2025-10-24", "trades": 40, "netPnl": 102.27, "activeOutcome": "正" },
+        { "episode": 20, "replayStart": "2025-11-23", "trades": 2, "netPnl": -2.67, "activeOutcome": "负" },
+        { "episode": 21, "replayStart": "2025-12-23", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 22, "replayStart": "2026-01-22", "trades": 7, "netPnl": -30.71, "activeOutcome": "负" },
+        { "episode": 23, "replayStart": "2026-02-21", "trades": 5, "netPnl": -43.71, "activeOutcome": "负" },
+        { "episode": 24, "replayStart": "2026-03-23", "trades": 1, "netPnl": -1.37, "activeOutcome": "负" },
+        { "episode": 25, "replayStart": "2026-04-22", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" },
+        { "episode": 26, "replayStart": "2026-05-22", "trades": 1, "netPnl": -1.88, "activeOutcome": "负" },
+        { "episode": 27, "replayStart": "2026-06-21", "trades": 1, "netPnl": 1.68, "activeOutcome": "正" },
+        { "episode": 28, "replayStart": "2026-07-21", "trades": 0, "netPnl": 0.00, "activeOutcome": "无交易" }
+      ],
+      "policySensitivity": [
+        { "policy": "72 bps / 12 bars（固定）", "netReturn": 0.12005627052512424, "grossReturn": 0.20823437843782075, "maxDrawdown": 0.08177585844380866, "trades": 172, "profitableTradeRate": 0.5697674418604651, "gate": "通过" },
+        { "policy": "96 bps / 12 bars", "netReturn": 0.06740976613078886, "grossReturn": 0.12797367137439125, "maxDrawdown": 0.08266886399764636, "trades": 123, "profitableTradeRate": 0.5121951219512195, "gate": "通过" },
+        { "policy": "72 bps / 96 bars", "netReturn": 0.057317680999247056, "grossReturn": 0.10348482880612585, "maxDrawdown": 0.08166014875539511, "trades": 92, "profitableTradeRate": 0.5760869565217391, "gate": "通过" },
+        { "policy": "72 bps / 24 bars", "netReturn": 0.032187048286421494, "grossReturn": 0.10236594429208115, "maxDrawdown": 0.10377894474944475, "trades": 138, "profitableTradeRate": 0.5869565217391305, "gate": "未通过" },
+        { "policy": "48 bps / 12 bars", "netReturn": 0.02171965680209298, "grossReturn": 0.15488066810779696, "maxDrawdown": 0.09840840435063787, "trades": 266, "profitableTradeRate": 0.5375939849624061, "gate": "通过" },
+        { "policy": "72 bps / 48 bars", "netReturn": 0.014825719588329012, "grossReturn": 0.06888491456564537, "maxDrawdown": 0.10585371179857285, "trades": 109, "profitableTradeRate": 0.5504587155963303, "gate": "未通过" }
+      ]
+    },
+    "accessIssues": []
+  },
+  "sources": [
+    {
+      "id": "v4_replay",
+        "label": "Retired V4 semantic-mismatch replay",
+      "path": ".research-data/replays/historical-replay-v4-20260821T181600Z.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT result.ordinary.netReturn AS ordinary_net_return, result.ordinary.grossPnlReturn AS ordinary_gross_return, result.ordinary.maxDrawdown AS max_drawdown, result.ordinary.trades AS trades, result.ordinary.profitableTradeRate AS profitable_trade_rate, result.stress48Bps.netReturn AS stress_net_return, result.ordinary.netPnlByInstrument AS net_pnl_by_instrument, result.policySensitivity AS policy_sensitivity FROM read_json_auto('.research-data/replays/historical-replay-v4-20260821T181600Z.json')",
+        "query": "json.loads(Path('.research-data/replays/historical-replay-v4-20260821T181600Z.json').read_text(encoding='utf-8'))",
+        "description": "Reads the immutable retired V4 replay solely to audit its superseded timing semantics and historical ledger fields.",
+        "executed_at": "2026-08-21T18:19:42.110Z",
+        "tables_used": [".research-data/replays/historical-replay-v4-20260821T181600Z.json"],
+        "filters": ["decision = research_only", "promotable = false", "shadowDaysCredited = 0", "ordinary round-trip cost = 24 bps", "stress round-trip cost = 48 bps"],
+        "metric_definitions": ["netReturn = finalCash / 10000 - 1", "maxDrawdown = max peak-to-current decline of 5-minute virtual equity", "asset net PnL = sum trade netPnl by instrument", "episode net PnL = sum trade netPnl by episodeId"]
+      }
+    },
+    {
+      "id": "version_comparison",
+      "label": "Retired V3/V4 historical comparison",
+      "path": "docs/reports/v4-profitability/source-notes.md",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "WITH v3 AS (SELECT 'V3' AS version, result FROM read_json_auto('.research-data/replays/historical-replay-v3-20260821T171933Z.json')), v4 AS (SELECT 'V4' AS version, result FROM read_json_auto('.research-data/replays/historical-replay-v4-20260821T181600Z.json')) SELECT version, result.ordinary.netReturn AS ordinary_net_return, result.stress48Bps.netReturn AS stress_net_return, result.ordinary.maxDrawdown AS max_drawdown FROM v3 UNION ALL SELECT version, result.ordinary.netReturn, result.stress48Bps.netReturn, result.ordinary.maxDrawdown FROM v4",
+        "query": "reports = [json.loads(Path(path).read_text(encoding='utf-8')) for path in ['.research-data/replays/historical-replay-v3-20260821T171933Z.json', '.research-data/replays/historical-replay-v4-20260821T181600Z.json']]",
+        "description": "Compares two retired historical contracts from the same frozen cohort; neither is a V6 baseline.",
+        "executed_at": "2026-08-21T18:21:00.000Z",
+        "tables_used": [".research-data/replays/historical-replay-v3-20260821T171933Z.json", ".research-data/replays/historical-replay-v4-20260821T181600Z.json"],
+        "filters": ["same cohortSha256 = 6d7c319f462afdace7400053e91110b863f14941616bc4899be05e2d84f0f98c", "ordinary and 48 bps stress ledgers only"],
+        "metric_definitions": ["netReturn = finalCash / startingCash - 1", "targetAligned = later semantic audit outcome; the retired report's original flag is not trusted"]
+      }
+    }
+  ]
+}

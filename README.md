@@ -1,101 +1,150 @@
-# 潮汐台 Tideguard
+# 墨衡 MOHENG
 
 [![Offline checks](https://github.com/mikutea/tideguard-okx-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/mikutea/tideguard-okx-demo/actions/workflows/ci.yml)
 
-Tideguard 是一个仅连接 **OKX 模拟盘** 的 Windows 本地现货量化终端。v0.3 提供常驻后台、定时训练、未来影子验证、Codex 监督晋级、IOC 自动入场、实际成交库存跟踪，以及止损、止盈和定时自动退出。
+墨衡是一套 Windows 本地运行的 OKX 现货量化研究、模型治理与受控执行系统。它把公共行情、训练、样本外验证、未来 Shadow、Codex 监督、确定性风控和交易执行拆成不同权限平面，并在专业可视化驾驶舱中展示每一步证据。
 
-它的目标是持续寻找并验证更稳健的候选模型，而不是承诺收益。模型不能在线改代码、风险阈值、交易品种或资金规模；每次更迭都产生新的冻结 JSON artifact，只有通过样本外、未来 shadow、相对 champion 改善和 Codex 内容哈希审查后，才可影响未来订单。
+v0.4 默认使用 **OKX 模拟盘**。它同时提供隔离的 OKX Live 连接和人工限时交易路径，但 Live 的 AI 自动入场保持禁用，直到 Demo 积累足够的前瞻成交证据并另行实现实盘专属预算与授权。软件不承诺收益，也不会把 accuracy 或回测排行描述为盈利保证。
 
-## 固定安全边界
+![墨衡专业运行驾驶舱](docs/moheng-concept.png)
 
-- 所有交易请求固定发送到 `https://openapi.okx.com`，并强制携带 `x-simulated-trading: 1`；没有正式盘切换路径。
-- 只允许 `BTC-USDT / SPOT / cash`，零杠杆、无转账和提现端点。
-- 自动订单固定为限价 IOC；提交响应不能代替逐笔终态查询。
-- 每次自动入场名义额固定 10 USDT，同时最多一个模型持仓，每个 UTC 日最多三次入场。
-- SELL 只能使用 Tideguard 按 OKX 实际累计成交和费用计算出的模型净库存，不能卖出账户原有 BTC。
-- 自动止损 1.5%、止盈 2.5%、目标持有 12 根 5 分钟 K 线；验证和未来 shadow 使用相同的保守 bracket 语义及 24 bps 双边压力成本。
-- 未知下单结果、账户身份变化、订单回显不一致、审计损坏或不可交易残余会触发持久急停和人工核对，未知提交绝不自动重试。
-- 用户关闭长期 Demo master 后立即禁止新开仓；已确认属于模型的持仓仍进入退出管理。
-- Codex 的监督授权只绑定一笔订单、一个用途和一个决策 ID，不能被浏览器手工单或旧预检借用。
-- 原始 API Key、Secret 和 Passphrase 仅存入 Windows Credential Manager；SQLite 只保存不可逆的 API Key/OKX UID 身份指纹。
-- 本地服务只监听 `127.0.0.1:8791`，并强制单后端实例、单 Uvicorn worker。
+## 核心能力
 
-> 这是模拟盘研究和工程验证软件，不是盈利承诺、投资建议或实盘代炒工具。
+- OKX 官方公共 `BTC-USDT / SPOT / 5m` 历史可恢复回填；当前接口实测可追溯到 2018-01-11，具体起点每次仍以官方空页为准。
+- 独立 `market-data.sqlite3`：确认线、严格时间网格、内容冲突隔离、缺口门、流式快照 SHA-256 和断点续传。
+- NumPy 向量化的冻结线性逻辑候选；三组预声明配置共享同一特征矩阵和相同 OOS cohort。
+- V6 historical replay：365 天训练、末 30 天隔离校准、12-bar label horizon + 1-bar embargo（共 13 bars gap）、每 30 天重训/回放、long/flat、非重叠资本和 24/48 bps 成本；确认线收盘与下一根开盘共用同一时间边界，执行时钟使用 `latency=0`。V5 因额外等待一根 K 线而退役。
+- challenger 优先与同 cohort champion 比较；跨 cohort 时使用新快照内同 `trainingConfigSha256` 的 champion 配方基线，缺失即失败关闭。
+- 新候选必须经过确定性门、与下一根开盘成交一致的 Future Shadow、Codex 脱敏证据审查和 generation CAS；协议或策略哈希不一致的旧 Shadow 不计入晋级，训练失败不会替换当前 champion。
+- Demo 自动订单使用限价 IOC，按真实累计成交和费用记录模型自有库存；未知提交绝不盲重试。
+- 常驻后台负责训练调度、持仓恢复、CAA 失联保护、退出管理和审计；关闭 UI 不代表停止后台。
+- “墨衡”专业驾驶舱包含运行中心、数据谱系、训练阶段、walk-forward 矩阵、模型谱系、执行与风险、问题中心及 Demo/Live 设置。
+
+## Demo 与 Live
+
+| 能力 | Demo（默认） | Live |
+|---|---|---|
+| 独立凭证 | `Tideguard.OKX.Demo` | `Tideguard.OKX.Live` |
+| 请求环境 | 强制模拟头 | 明确无模拟头 |
+| 状态与订单 tag | 旧目录兼容 / `tideguarddemo` | `live/` / `tideguardlive` |
+| 人工交易 | 10 分钟授权 | 60 秒独立高风险授权 |
+| 单笔硬上限 | 25 USDT | 10 USDT 且不超过权益 0.05% |
+| AI 长期自动执行 | champion + Codex lease + Demo master | v0.4 禁用 |
+
+Live 切换不是普通开关。服务端会关闭自动化、核对两侧审计/订单/模型持仓、验证目标 OKX `account/config`、要求 Read+Trade/禁 Withdraw/IP 绑定/Spot mode，然后签发绑定证据的一次性 challenge。用户需完成风险勾选、逐字确认和 10 秒冷静期；确认时全部条件会再次核对。切换只对下一次重启生效，重启后仍为观察+急停。
+
+详见 [Demo / Live 安全边界](docs/LIVE-SAFETY.md)。
 
 ## Windows 桌面版
 
-普通用户可从 [GitHub Releases](https://github.com/mikutea/tideguard-okx-demo/releases/latest) 下载 `Tideguard-Setup-*.exe`。安装器默认创建当前用户登录自启动的后台 daemon；关闭桌面窗口不会停止训练、shadow 或已有持仓退出。安装器不会自动启用 Demo master，也不会打包任何凭证或本地数据库。
+墨衡 v0.4 安装器尚未发布；当前 [GitHub Releases](https://github.com/mikutea/tideguard-okx-demo/releases/latest) 的最新版仍是旧品牌 Tideguard v0.3.0，请不要把它误认为本分支构建。v0.4 合并并完成发布检查后，Release 才会提供 `Moheng-Setup-*.exe`。安装器继续沿用原 Tideguard AppId、数据目录、mutex 和内部 EXE 名称以保持升级兼容，而用户可见名称、图标、快捷方式和新 Release 产物使用墨衡。
 
-开始菜单提供三个入口：
+开始菜单包含：
 
-- **Tideguard**：打开桌面界面；
-- **Tideguard 凭证管理**：把 OKX Demo 凭证写入当前用户的 Windows Credential Manager；
-- **停止 Tideguard 后台服务**：停止常驻 daemon。
+- **墨衡 MOHENG**：打开运行驾驶舱；
+- **墨衡凭证管理**：在隔离窗口管理 Demo / Live Windows Credential Manager 凭证；
+- **启动墨衡后台服务**：启动本机长期研究、回填与训练 daemon；安装时也可选择登录自启动；
+- **停止墨衡后台服务**：安全停止当前用户 daemon。
 
-源码构建发行包：
-
-```powershell
-.\packaging\build-release.ps1
-```
-
-产物采用 PyInstaller `onedir` 和 Inno Setup，详见 [打包说明](packaging/README.md)。
+安装器和 ZIP 不包含 API 凭证、本地 SQLite、行情缓存或模型运行状态。应用尚未代码签名，Windows SmartScreen 可能显示未知发布者；请从本仓库 Release 下载并核对 `SHA256SUMS.txt`。
 
 ## 从源码运行
 
-前置条件：Python 3.11、Node.js 22 和 Corepack。
+前置条件：Windows、Python 3.11+、Node.js 22、Corepack。
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\setup.ps1
-.\.venv\Scripts\python.exe -m okx_demo_lab.cli credentials set
+.\.venv\Scripts\python.exe -m okx_demo_lab.cli credentials set --environment demo
 .\scripts\run.ps1
 ```
 
-源码入口使用项目根目录下已忽略的 `.local-data\`；安装版使用 `%LOCALAPPDATA%\Tideguard\`。原始秘密不得粘贴到聊天、截图或项目文件。
+可选的 Live 凭证必须单独设置：
 
-## 长期模型流水线
-
-后台每天从 OKX 公共接口获取 10,000 根已完成且连续的 `BTC-USDT 5m` K 线，训练三组确定性的线性逻辑 challenger。当前基线故意使用严格 JSON 和纯数据权重，而不加载来自网络的 `pickle`、`joblib` 或“高收益模型”。
-
-晋级链为：
-
-```text
-定时训练
-  → label horizon + embargo 的外层 walk-forward
-  → long/flat、bracket、非重叠资本、24 bps 成本诊断
-  → 至少 7 天且 20 个结算 BUY 的未来 shadow
-  → 相对当前 champion 的 OOS 改善门
-  → Codex 脱敏证据审查与 generation CAS
-  → 最长 24 小时执行 lease
-  → 10 USDT Demo canary
-  → 净成本结果监测、暂停或回滚
+```powershell
+.\.venv\Scripts\python.exe -m okx_demo_lab.cli credentials set --environment live
 ```
 
-Codex Supervisor 命令只输出/接收模型哈希、验证指标和状态，不读取 OKX Secret：
+不要把 Key、Secret 或 Passphrase 粘贴到聊天、截图、`.env`、项目文件或日志。建议 Live 使用独立子账户、小额可全部损失资金、Read+Trade、禁 Withdraw 和固定 IP 白名单。OKX 的 Trade 权限仍可能包含转账/配置类写操作。
+
+源码运行状态写入已忽略的 `.local-data\`；安装版使用 `%LOCALAPPDATA%\Tideguard\`。外显品牌已更换，但内部命名空间故意保留，避免升级丢失既有 Demo 账户绑定和审计链。
+
+## 模型更迭链
+
+```text
+OKX public completed candles
+  -> recoverable history store + immutable snapshot
+  -> deterministic features + cost-aware labels
+  -> three frozen challengers on one cohort
+  -> rolling purged walk-forward OOS
+  -> prospective shadow
+  -> Codex content-addressed review
+  -> champion generation / rollback
+  -> deterministic preview + dispatch guard
+  -> OKX Demo IOC entry / model-owned exit
+```
+
+“自我更新”指产生新的不可执行模型 artifact，再由固定门槛和 Codex 监督决定晋级；模型不能在线改源码、特征、标签、环境、品种、资金上限、风险策略或 kill switch。不得下载并反序列化来源不明的 `.pkl/.joblib/.pt` “高收益模型”。
+
+Codex Supervisor 只读取脱敏的模型/数据/策略哈希和验证指标：
 
 ```powershell
 .\.venv\Scripts\python.exe -m okx_demo_lab.cli supervisor review
 ```
 
-旧版浏览器人工晋级和一次性 BUY permit 已返回 `410 Gone`。Freqtrade/FreqAI 不随安装器捆绑；如以后接入，只能作为独立 localhost 公共信号源，不能持有 Tideguard 凭证或直接下单。详细契约见 [长期自动量化架构](docs/AUTONOMY-ARCHITECTURE.md) 与 [模型架构](docs/ML-ARCHITECTURE.md)。
+完整说明见 [模型架构](docs/ML-ARCHITECTURE.md)、[长期自动量化架构](docs/AUTONOMY-ARCHITECTURE.md) 和 [历史数据仓库](docs/HISTORY-DATA.md)。历史高速回放可用 `scripts/run-historical-replay.ps1` 在冻结多资产 cohort 上按 30 天周期重训并回放。V6 的正确口径是：确认线收盘时间戳就是下一根 K 线开盘时间戳，在该边界以 `latency=0` 入场，12 根后开盘退出；12-bar label horizon 加 1-bar embargo 形成 13 bars gap。最终合同还强制 open-boundary 检查点估值标记、四账本峰谷见证及现金/持仓市值对账。[V6 修正语义报告](docs/reports/v6-execution-semantics/report.md) 已经两次确定性复跑，并通过 standalone 结构/逐笔账本完整性验证；该验证不会从冻结源数据重新训练或重放，因此明确为 `sourceReplayVerified=false`。多资产历史开发结果为正，但 BTC 切片仅 14 笔，仍未过样本门。V5 曾在这个已对齐的边界上再次施加一根延迟，现已退役；[V5 历史诊断](docs/reports/v5-execution-readiness/report.md) 仅保留旧值。V6 与 V5 都不能累计 Shadow 天数或触发订单，当前执行白名单仍仅为 `BTC-USDT`。
 
-## 验证
+## 第三方模型研究层
+
+GitHub 上的模型、框架和“高收益策略”不会直接进入执行器。隔离的 Python
+3.11 研究层会在同一不可变全历史快照上本地重训 scikit-learn、LightGBM、
+XGBoost、CatBoost 和 MLP，并统一执行 30 折 rolling OOS、最后四折封存以及
+双成本压力测试：
+
+```powershell
+.\scripts\setup-research.ps1
+.\scripts\run-research-benchmark.ps1
+```
+
+2026-08-21 的首轮六模型加集成评测全部被拒绝，没有模型进入 registry、
+shadow 或订单链。精确协议、指标与 canonical 报告哈希见
+[第三方模型基准](docs/THIRD-PARTY-BENCHMARK.md)，源码与许可边界见
+[研究准入清单](research/THIRD-PARTY.md)。
+
+NautilusTrader 仅以锁定版本和 wheel 哈希的 Python 3.12 隔离 sidecar PoC 接入；
+每次运行还会逐文件核对 setup 状态、安装 `RECORD` 和 wheel 内容；
+它不进入桌面 EXE、凭证进程或订单链，也不会改变 `BTC-USDT` 执行白名单。采用
+边界见 [NautilusTrader 采用决策](docs/NAUTILUS-ADOPTION.md)。
+
+多资产和新闻/社媒扩展遵循独立研究边界：公共 universe 发现不会扩大订单
+白名单；弱信号必须保留首次可见时间和许可快照，先做消融与前瞻 Shadow。
+设计、当前 6 个临时研究候选和来源拒绝清单见
+[多资产与替代数据边界](docs/MULTI-ASSET-ALTERNATIVE-DATA.md)。
+
+## 验证与发行
 
 ```powershell
 .\scripts\check.ps1
+.\packaging\build-release.ps1 -Version 0.4.0
 ```
 
-该命令执行后端测试、前端类型检查、生产构建和秘密扫描，不调用 OKX 私有 API，也不发订单。模拟盘端到端测试只有在用户显式启用 master 后才开始。
+离线检查隔离真实 Credential Manager 与环境 selector，执行后端、前端、桌面和打包契约测试以及秘密扫描；不会访问真实私有 API 或发送订单。发行构建使用 Windows x64 Python 3.11、PyInstaller `onedir` 与 Inno Setup。
 
 ## 目录
 
 ```text
-backend/   FastAPI、OKX Demo 客户端、风控、模型、监督与 SQLite 状态
-frontend/  React + Vite 响应式桌面界面
-desktop/   pywebview 桌面宿主、后台 daemon 与凭证管理窗
-packaging/ PyInstaller、Inno Setup 和 GitHub Release 构建
-scripts/   Windows 安装、启动与离线检查脚本
-docs/      架构、验证和设计记录
+assets/     墨衡 PNG / ICO 品牌资产
+backend/    FastAPI、OKX profile、数据仓库、ML、监督、风控与 SQLite 状态
+frontend/   React + Vite 专业可视化驾驶舱
+desktop/    pywebview 桌面宿主、daemon 与隔离凭证窗口
+packaging/  PyInstaller、Inno Setup、锁文件和 GitHub Release 构建
+research/   隔离的第三方模型、锁定依赖、报告与许可准入
+scripts/    Windows 安装、启动与离线检查
+docs/       数据、模型、Live 安全、设计和验证记录
 ```
 
 公开仓库：<https://github.com/mikutea/tideguard-okx-demo>
+
+## 许可证
+
+项目源码按 [MIT License](LICENSE) 发布；主要运行时组件与许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。第三方依赖及其品牌分别遵循各自许可证；OKX 与墨衡不存在隶属或收益背书关系。

@@ -1,80 +1,162 @@
-# Tideguard v0.3 模型、验证与监督架构
+# 墨衡 v0.4 模型、验证与监督架构
 
 ## 可执行结论
 
-v0.3 的可执行模型是本机训练、内容寻址、严格 JSON 的逻辑回归基线。它是真实机器学习模型，但不是“高收益模型”，也不允许边交易边自改。训练、验证、监督和执行分别落盘；模型只有取得当前 Codex 决策和短期 lease 后才能提出一笔固定 10 USDT 的 Demo 入场。
+v0.4 的内置模型是本机 NumPy 向量化、内容寻址、严格 JSON 的线性逻辑基线。它是真实机器学习模型，但不是“高收益模型”。训练、验证、未来 Shadow、监督和执行分别落盘；模型不能在线修改代码、风险阈值、交易环境或资金规模。
 
 ```text
 OKX public completed candles
-  -> deterministic features and bracket labels
-  -> three frozen challengers
-  -> purged walk-forward OOS
-  -> forward shadow
+  -> recoverable SQLite history + immutable snapshot
+  -> one shared feature/label matrix
+  -> three frozen training configurations
+  -> rolling purged walk-forward OOS
+  -> prospective shadow
+  -> paired champion-recipe comparison
   -> Codex content-addressed decision
-  -> champion generation
-  -> scoped dispatch gate
-  -> OKX Demo IOC order
+  -> champion generation + scoped Demo lease
+  -> deterministic risk + OKX Demo IOC
 ```
 
-## 数据与标签
+## 数据与特征
 
-- 固定 `BTC-USDT / 5m`，每轮目标 10,000 根 K 线。
-- OKX history-candles 按每页最多 100 根分页；游标必须严格前进，页面间采用保守限频。
-- 只接受 9 字段、`confirm=1`、严格 5 分钟连续、时间戳不在未来的 K 线。
-- 16 个特征全部只使用当时及过去数据：多周期收益、波动率、振幅、相对成交量、EMA 距离、RSI 和 UTC 周期编码。
-- label horizon 为 12 根 K 线。未来路径先按 1.5% 止损、2.5% 止盈判断；同一根 OHLC 同时触碰两侧时保守计止损，否则按第 12 根收盘价退出。
-- 标签与验证统一扣除 24 bps 双边压力成本。训练配置、特征 schema、数据内容和验证报告均进入 SHA-256 绑定。
+- 固定 `BTC-USDT / SPOT / 5m`；首次回填持续到 OKX 官方空页，2026-08-20 实测当前约 90.5 万根、最早 2018-01-11。
+- 只训练 `confirm=1`、严格 5 分钟连续、无冲突、OHLC 合法的快照。
+- 16 个特征只使用当时及过去数据：1/3/12/24/48 根收益、12/48 根波动率、振幅、相对成交量、EMA12/48 距离、RSI 和 UTC 小时/星期周期。
+- 标签观察未来 12 根。路径先按 1.5% 止损、2.5% 止盈；同一 OHLC 同时触碰两侧时保守计止损，否则第 12 根收盘退出。
+- 标签与验证扣除 24 bps 双边压力成本；数据、特征、标签、配置、split 和报告全部进入 SHA-256 证据链。
 
-## Walk-forward v3
+矩阵采用 `int64 timestamps + float64 features/returns + uint8 labels`。特征与标签只构建一次，三组配置共享同一矩阵；最终部署 fit 只使用最近 365 天，完整历史用于跨市场阶段 OOS，而不是机械等权拟合。
 
-当前报告 schema 是 `tideguard.walk-forward.v3`，评估模式为 `long-only-bracket-fixed-horizon-non-overlapping`：
+## Walk-forward v4
 
-- 外层训练和测试按时间顺序，gap 为 label horizon 加 embargo；
-- 外层测试窗互不重叠；
-- 只在 flat 时接受 BUY，SELL 不产生空头收益；
-- 一次入场占用诊断资本 12 根 K 线，期间信号被忽略；
-- 各折报告交易数、准确率、净成本收益、最大回撤和最差折；
-- v1 的重叠 long/short 和 v2 的无 bracket 固定周期报告仍可读取，但必以 `unsupported_evaluation_semantics` 拒绝晋级。
+当前可晋级报告 schema 为 `tideguard.walk-forward.v4`，评估语义仍为 cash-SPOT long/flat、bracket、固定周期和非重叠资本：
 
-当前长期门槛至少要求 5 折、1,000 个 OOS 行、20 笔非重叠交易、52% long/flat 准确率、0.5% OOS 净结果、最差折不低于 -3%、最大回撤不高于 10%，且成本假设不少于 24 bps。这些只是淘汰门，不是未来收益保证。
+- rolling 365 天训练；
+- label horizon 12 + embargo 1，共 13 bars gap；
+- 90 天 OOS 测试和 90 天 step，测试窗不重叠；
+- 标准化只在每个训练折拟合；
+- flat 时才接受 BUY，持仓窗内信号被忽略；SELL 不产生空头收益；
+- 报告逐折起止、行数、交易、准确率、扣成本净收益、最弱折和最大回撤。
 
-## Future shadow 与 challenger 改善门
+v1–v3 artifact/report 仍可读取和审计，但必以 `unsupported_evaluation_semantics` 拒绝新的晋级。
 
-每个 validated/champion 模型在新完成 K 线上生成不可执行 shadow BUY。结算使用与 live 相同的 bracket、12 根持有窗和 24 bps 成本。晋级至少需要 20 个已结算 BUY、7 天跨度、正净结果和不高于 3% 的 shadow 回撤。
+当前确定性淘汰门至少要求 5 折、1,000 OOS 行、20 笔非重叠交易、52% long/flat 准确率、0.5% 聚合 OOS 净结果、最差折不低于 -3%、最大回撤不高于 10%，且往返成本不少于 24 bps。这些只是淘汰门，不是未来收益保证。
 
-已有 champion 时，challenger 的历史 OOS 净结果还必须至少高出 0.2 个百分点，且最大回撤不得比 champion 高 1 个百分点以上。不同训练窗口的比较并非严格因果结论，所以 Codex 仍需结合 shadow、样本数、分折稳定性和 Demo 结果审查；程序不会把单一排行等同于收益提升。
+## 长期更迭与同口径基线
+
+同一批三个 candidate 绑定相同：
+
+- `benchmarkCohortId`
+- `evaluationDatasetSha256`
+- `marketSnapshotSha256`
+- `splitProtocolSha256`
+- OOS 起止日期
+
+已有 champion 时：
+
+1. 若旧 champion 与 candidate 同 cohort，直接按同一报告口径比较。
+2. 若新一轮使用新 snapshot，系统在新 cohort 的三组候选中找到与旧 champion 相同 `trainingConfigSha256` 的模型，将其作为 **paired champion-recipe baseline**。
+3. challenger 必须在该 paired baseline 之上满足净收益改善和回撤不退化门。
+4. 同配方 candidate 与自身 baseline 比较时不会产生所需改善，因此不能靠重复训练自胜。
+5. 旧配方不在冻结候选族中或配对缺失时，返回 `champion_comparison_missing` 并停止自动换代。
+
+这里重评的是 champion 的训练配方，不是把一个已拟合的静态 artifact 回测到它诞生前的历史；因此不会制造前视比较。
+
+## Artifact v2
+
+冻结 artifact 继续使用严格 JSON，不使用 pickle/joblib。manifest v2 额外绑定：
+
+- evaluation dataset 与 final-fit dataset SHA-256；
+- final-fit 行数和训练起止；
+- training config、feature schema、benchmark cohort、market snapshot 和 split protocol；
+- trainer、代码 revision、seed 和 validation run。
+
+registry 在写入 validation 前逐项核对 manifest/report；不一致的候选不会进入 validated。
+
+## Future Shadow
+
+每个 validated/champion 在新的已完成 K 线上生成不可执行 shadow BUY。`moheng.shadow.next-open-bracket.v2` 固定为“确认线收盘决策、下一根开盘入场、12 根持有、再下一根开盘时间退出”；确认线的收盘时间戳与下一根线的开盘时间戳是同一边界，在对齐后的执行时钟上不再额外等待。止损与止盈同根触发时先按止损结算，24 bps 成本按双边乘法进入成交价。每条记录绑定 artifact、协议版本和 `AutonomyPolicy` 哈希。旧收盘价成交口径及策略哈希不一致的数据会保留审计痕迹，但不会计入新证据。
+
+Demo 候选晋级的最小 Shadow 门仍为 20 个已结算 BUY、7 天跨度、正净结果和不高于 3% 的回撤。面向未来 Live 的独立证据门更高：同一 champion 至少 90 天、100 个前瞻 BUY，加上至少 30 个 Demo 闭环、Shadow 与 Demo 都为正净结果且回撤不高于 3%。这些门只表达证据充足度；当前 Live AI 自动执行仍物理禁用。
+
+Shadow 是前瞻证据，但仍不是成交证明；实际 Demo 的滑点、成交率、费用、残余和 CAA 状态继续独立监测。
 
 ## Codex Supervisor
 
-`CodexSupervisor.review_pack()` 只包含脱敏状态、模型/报告哈希、OOS 和 shadow 指标、Demo 净成本结果、审计链状态及硬策略哈希。`generatedAt` 仅用于展示，不进入证据哈希，因此分开的 `review` 与 `approve` 命令可以复现同一静态状态；任何实质状态变化都会改变证据哈希。
+`CodexSupervisor.review_pack()` 只包含脱敏状态、artifact/report/snapshot/policy 哈希、同口径 OOS、Shadow、Demo 净成本结果、Live 证据缺口和审计链状态。它不读取 API Secret，也不能选择 Demo/Live、修改品种、资金或 kill。
 
 允许的决策：
 
-- `approve`：空仓时将 validated challenger 以 generation CAS 晋级；
-- `lease`：用户已启用 Demo master 时为当前 champion 签发最长 24 小时许可；
+- `approve`：空仓时对通过全部门槛的 candidate 做 generation CAS 晋级；
+- `lease`：用户已启用 Demo master 时，为当前 champion 签发最长 24 小时的 Demo 执行许可；
 - `reject` / `suspend`：拒绝候选或停止新入场；
-- `rollback`：空仓时恢复一个仍通过当前门槛的 retired champion。
+- `rollback`：空仓时恢复一个仍满足当前证据门的 retired champion。
 
-registry 变化、审计追加和 supervisor applied 标记不是同一数据库事务，因此执行端额外要求“当前 champion 存在完整 applied Codex 决策”。任何中途崩溃都会留下不可执行 champion，而不是绕过监督。
+Live profile 在 CLI、SafetyController 和服务端状态中均拒绝 Demo Codex lease。
 
 ## 执行语义
 
-- 自动 entry/exit 都走现有 `TradingService.preview -> commit -> dispatch_guard`。
-- 最终 HTTP 前再次检查用户 master、champion 代次和 artifact、lease、模型持仓身份、Demo 回撤及硬风控。
-- 监督 arm 绑定 decision ID 和 `entry|exit` 用途；浏览器不能在该窗口创建或提交手工订单。
-- IOC 提交后逐笔 GET order；只有 `accFillSz` 进入模型库存。
-- BUY 的 BTC 手续费减少模型净库存；USDT 入场/退出费用进入实际净成本回报。
-- SELL 先按 lotSz 向下对齐且不超过模型净库存。部分成交只扣实际成交，继续管理剩余数量。
-- 低于交易所最小卖出量的残余不会被写成“已平仓”；系统保留数量、急停并进入 manual review。
-- 任何不确定提交、取消、身份错配或持久化异常都禁止重试同一未知订单。
+- 自动 entry/exit 只在 Demo 走 `preview -> atomic claim -> dispatch_guard -> commit`。
+- 最终 HTTP 前复核 user master、champion 代次/artifact、lease、账户身份、审计链、deadman lease 和硬风控。
+- IOC 提交后逐笔查询；只有 `accFillSz` 进入模型库存。
+- BUY 的 BTC 手续费减少净库存，USDT 费用进入净成本结果。
+- SELL 不超过模型自有剩余库存；小于交易所最小量的残余进入 manual review，不能伪装已平仓。
+- 模糊提交、取消、账户错绑或本地持久化异常触发 kill；未知订单不自动重试。
 
 ## FreqAI 边界
 
-当前安装器不捆绑 Freqtrade/FreqAI。FreqAI 若以后接入，只允许独立进程通过固定 localhost 协议提供已完成 K 线的冻结信号；它不能读取 OKX 凭证，也不能调用 commit。不得从 GitHub 下载并反序列化未知 `.pkl/.joblib/.pt` “高收益模型”。
+v0.4 不把 Freqtrade/FreqAI 打进 EXE。未来适配时只能作为独立 localhost 公共信号/研究进程，不能持有墨衡凭证或直接调用 commit。Freqtrade/FreqAI 为 GPLv3，若随安装器分发还需要完整许可、对应源码与构建义务。不得下载并反序列化未知 `.pkl/.joblib/.pt` “高收益模型”。
 
 ## 已知边界
 
-- 当前只研究一个交易对和一个线性模型族，不能据此声称跨市场泛化。
-- 约 35 天滚动历史加至少 7 天未来 shadow 仍不足以覆盖所有市场状态；长期监督应积累更长 Demo 证据。
-- OHLC 无法知道同一根 K 线内先触发止损还是止盈，验证按止损优先处理。
-- 极端跳空、交易所停机、残余库存和未知订单仍可能需要人工账户核对；Codex 不能越过交易所事实或删除安全锁。
+- 当前只覆盖一个交易对和一个线性模型族；跨资产和非线性泛化尚未证明。
+- OHLC 无法确定同一根内止损/止盈先后，验证按更不利结果。
+- 通过历史 OOS 与 Shadow 仍可能在未来失效；没有模型能保证盈利。
+
+## Historical replay V6 与 V5 退役
+
+`research/historical_replay.py` 在隔离研究环境中对最新冻结多资产 cohort 运行高速
+因果回放。它采用 365 天滚动训练协议，末 30 天作为隔离校准窗、此前数据拟合基础
+模型，并每 30 天更迭一次；标签清除区间和模型可用时间戳保持独立。V6 的监督和
+账本合同固定为 `确认线收盘决策/下一根开盘同一时间边界 -> latency=0 入场 ->
+12 根后开盘退出`。label horizon 为 12 bars，另加 1-bar embargo，训练与测试间
+共保留 13 bars gap。模型固定为低复杂度、固定种子的
+HistGradientBoostingClassifier，不在同一 canonical run 中按最终收益重新选择模型。
+`ml/historical_replay.py` 只实现无凭证的虚拟 SPOT 现金账本：
+对齐边界的零额外延迟、双边费用、双边滑点、历史报价成交量容量和固定持有期都进入结果。
+当 25% 目标仓位超过决策时已经确认的源 K 线报价成交量容量时，V6 缩小到容量且
+记录 clip，不读取入场 K 线事后完整成交量，也不把整笔订单伪装为可成交。
+`latency=0` 仍假设能在共同边界瞬时完成推理和下单，只是研究基线，不是实盘成交证明。
+
+审计发现，V4/V5 的特征时间戳已经位于“确认线收盘/下一根开盘”的共同边界，旧
+经纪商又施加 `latency=1`，使实际入场额外晚了一根 5 分钟 K 线。下列历史报告
+曾通过旧合同下的内容哈希与一致性复核，但现已退役，不能继续称为 canonical、
+不能用于晋级，也不能与修正后的 V6 结果直接比较。
+
+2026-08-21 的退役 V4 开发回放覆盖 840 天、28 代和 172 笔闭环交易：24 bps
+往返成本后净收益 `+12.0056%`，48 bps 压力成本后 `+0.6030%`，最大回撤
+`8.1776%`。该策略在同一历史诊断后固定，历史已经被观察，且收益集中于部分资产和
+周期；因此它不是封存 OOS 或未来盈利证明。完整诊断见
+`docs/reports/v4-profitability/report.html`。
+
+退役 V5 在同一预测矩阵上增加当前 `BTC-USDT` 执行白名单的独立现金账本。它曾记录 24 bps
+净收益 `+0.9311%`、48 bps 压力净收益 `+0.2309%`、最大回撤 `0.6577%`，但只有
+10 笔闭环。由于一根额外延迟，这些数值只保留为历史审计信息，不再构成 BTC
+可执行证据。完整退役说明见 `docs/reports/v5-execution-readiness/report.md`。
+
+V6 已在同一冻结 cohort 上按最终检查点估值合同完整运行两次，`result`
+canonical SHA-256 均为
+`d4c17435e470b606dfdf5cc278cb90e2a13356e31ed8d86484db99662b62f075`，验证器定义的
+稳定核心摘要均为 `16ed5ee04954c0119cab5c9355e5888fd77df114192e5f7f8d20f361a528eece`。
+最终合同强制 `checkpointValuationBasis=current_bar_open_at_checkpoint_boundary`，
+并在组合普通/压力和 BTC 普通/压力四套账本中保留可验证的峰谷见证与检查点。
+两份报告都通过 standalone 结构/逐笔账本完整性验证，但未由验证器从冻结源数据
+重新训练或重放（`sourceReplayVerified=false`）。24 bps 下 7 资产历史开发账本为
+`+26.8442%`、187 笔、开盘边界采样最大回撤 `4.7543%`；BTC-only 切片为
+`+1.7172%`、14 笔、开盘边界采样最大回撤 `0.8523%`，因低于 20 笔样本门而失败。
+完整口径和阻断见 `docs/reports/v6-execution-semantics/report.md`。
+历史回放始终固定为 `research_only / promotable=false`，只读取公共
+数据，不进入模型注册表、不累计 Shadow 天数、不修改仅 `BTC-USDT` 的执行白名单，
+也不具备订单能力。训练中心的播放、步进和速度按钮只是对报告检查点的本地可视化，
+不是后台交易控制器。
+- Live 仅支持独立人工限时交易，AI 自动入场在 v0.4 硬禁用。

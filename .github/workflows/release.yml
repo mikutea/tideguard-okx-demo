@@ -45,6 +45,15 @@ jobs:
           if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
             throw "Release tags must look like v1.2.3"
           }
+          git rev-parse --verify refs/remotes/origin/main *> $null
+          if ($LASTEXITCODE -ne 0) {
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+            if ($LASTEXITCODE -ne 0) { throw "Unable to resolve origin/main" }
+          }
+          git merge-base --is-ancestor $env:GITHUB_SHA refs/remotes/origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tags must point to a commit contained in main"
+          }
           "version=$($Matches.version)" >> $env:GITHUB_OUTPUT
 
       - name: Enable Corepack
@@ -86,7 +95,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: Tideguard-${{ steps.release.outputs.version }}-windows-x64
+          name: Moheng-${{ steps.release.outputs.version }}-windows-x64
           path: release/*
           if-no-files-found: error
           retention-days: 14
@@ -101,7 +110,7 @@ jobs:
       - name: Download verified release artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: Tideguard-${{ needs.build.outputs.version }}-windows-x64
+          name: Moheng-${{ needs.build.outputs.version }}-windows-x64
           path: release
 
       - name: Create or update GitHub Release
@@ -127,6 +136,8 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             & gh release upload $tag @assets --clobber
           } else {
-            & gh release create $tag @assets --verify-tag --generate-notes --title "Tideguard $tag"
+            $releaseFlags = @()
+            if ($tag -match '-') { $releaseFlags += '--prerelease' }
+            & gh release create $tag @assets @releaseFlags --verify-tag --generate-notes --title "墨衡 MOHENG $tag"
           }
           if ($LASTEXITCODE -ne 0) { throw "GitHub Release publication failed" }

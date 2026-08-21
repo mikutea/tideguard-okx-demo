@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import math
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Sequence
+
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
+import numpy as np
 
 from .strategy import (
     FrozenLinearModel,
@@ -16,10 +25,14 @@ from .strategy import (
 
 LEGACY_VALIDATION_SCHEMA_VERSION = "tideguard.walk-forward.v1"
 LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION = "tideguard.walk-forward.v2"
-VALIDATION_SCHEMA_VERSION = "tideguard.walk-forward.v3"
+LEGACY_BRACKET_VALIDATION_SCHEMA_VERSION = "tideguard.walk-forward.v3"
+VALIDATION_SCHEMA_VERSION = "tideguard.walk-forward.v4"
 LEGACY_EVALUATION_MODE = "directional-overlapping-long-short"
 LEGACY_LONG_ONLY_EVALUATION_MODE = "long-only-fixed-horizon-non-overlapping"
-LONG_ONLY_EVALUATION_MODE = "long-only-bracket-fixed-horizon-non-overlapping"
+LEGACY_BRACKET_EVALUATION_MODE = "long-only-bracket-fixed-horizon-non-overlapping"
+LONG_ONLY_EVALUATION_MODE = (
+    "long-only-bracket-fixed-horizon-non-overlapping-rolling-cohort"
+)
 
 
 class ValidationError(ValueError):
@@ -67,6 +80,60 @@ class Observation:
 
 
 @dataclass(frozen=True)
+class ObservationMatrix:
+    """Compact immutable-by-contract matrix used by the full-history v4 path."""
+
+    observed_at_ms: np.ndarray
+    features: np.ndarray
+    labels: np.ndarray
+    forward_returns: np.ndarray
+
+    def __post_init__(self) -> None:
+        timestamps = np.asarray(self.observed_at_ms)
+        features = np.asarray(self.features)
+        labels = np.asarray(self.labels)
+        returns = np.asarray(self.forward_returns)
+        if timestamps.ndim != 1 or features.ndim != 2:
+            raise ValidationError("observation matrix dimensions are invalid")
+        count = int(timestamps.shape[0])
+        if count < 2 or features.shape[0] != count:
+            raise ValidationError("observation matrix row counts are invalid")
+        if labels.shape != (count,) or returns.shape != (count,):
+            raise ValidationError("observation matrix vector lengths are invalid")
+        if features.shape[1] < 1:
+            raise ValidationError("observation matrix features are empty")
+        if not np.issubdtype(timestamps.dtype, np.integer):
+            raise ValidationError("observation timestamps must be integer milliseconds")
+        if np.any(np.diff(timestamps) <= 0):
+            raise ValidationError("observations must have strictly increasing timestamps")
+        if not np.all(np.isfinite(features)) or not np.all(np.isfinite(returns)):
+            raise ValidationError("observation matrix contains non-finite values")
+        if np.any((labels != 0) & (labels != 1)):
+            raise ValidationError("observation labels must be 0 or 1")
+        if np.any(returns <= -1.0) or np.any(returns > 1.0):
+            raise ValidationError("forward_return must be in (-1, 1]")
+        for array in (timestamps, features, labels, returns):
+            array.flags.writeable = False
+
+    def __len__(self) -> int:
+        return int(self.observed_at_ms.shape[0])
+
+    def window(self, start: int, stop: int) -> ObservationMatrix:
+        return ObservationMatrix(
+            observed_at_ms=self.observed_at_ms[start:stop],
+            features=self.features[start:stop],
+            labels=self.labels[start:stop],
+            forward_returns=self.forward_returns[start:stop],
+        )
+
+    def observed_at(self, index: int) -> datetime:
+        return datetime.fromtimestamp(
+            int(self.observed_at_ms[index]) / 1_000,
+            tz=timezone.utc,
+        )
+
+
+@dataclass(frozen=True)
 class WalkForwardSpec:
     train_size: int
     test_size: int
@@ -74,6 +141,8 @@ class WalkForwardSpec:
     embargo_size: int = 1
     label_horizon: int = 1
     expanding: bool = True
+    benchmark_cohort_id: str | None = None
+    market_snapshot_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.expanding, bool):
@@ -88,9 +157,51 @@ class WalkForwardSpec:
             raise ValidationError("test_size must exceed label_horizon")
         if self.step_size != self.test_size:
             raise ValidationError("outer test windows must be contiguous and non-overlapping")
+        cohort = self.benchmark_cohort_id
+        snapshot = self.market_snapshot_sha256
+        if bool(cohort) != bool(snapshot):
+            raise ValidationError("v4 cohort and market snapshot must be provided together")
+        if cohort:
+            if (
+                not cohort.startswith("cohort_")
+                or not 8 <= len(cohort.removeprefix("cohort_")) <= 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in cohort.removeprefix("cohort_")
+                )
+            ):
+                raise ValidationError("benchmark cohort ID is invalid")
+            if self.expanding:
+                raise ValidationError("v4 cohort validation must use a rolling train window")
+        if snapshot and (
+            len(snapshot) != 64
+            or any(character not in "0123456789abcdef" for character in snapshot)
+        ):
+            raise ValidationError("market snapshot hash is invalid")
+
+    @property
+    def is_v4(self) -> bool:
+        return self.benchmark_cohort_id is not None
+
+    @property
+    def split_protocol_sha256(self) -> str:
+        return sha256_hex(
+            canonical_json(
+                {
+                    "embargo_size": self.embargo_size,
+                    "evaluation_mode": LONG_ONLY_EVALUATION_MODE,
+                    "expanding": self.expanding,
+                    "label_horizon": self.label_horizon,
+                    "schema_version": VALIDATION_SCHEMA_VERSION,
+                    "step_size": self.step_size,
+                    "test_size": self.test_size,
+                    "train_size": self.train_size,
+                }
+            )
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value: dict[str, Any] = {
             "embargo_size": self.embargo_size,
             "expanding": self.expanding,
             "label_horizon": self.label_horizon,
@@ -98,6 +209,15 @@ class WalkForwardSpec:
             "test_size": self.test_size,
             "train_size": self.train_size,
         }
+        if self.is_v4:
+            value.update(
+                {
+                    "benchmark_cohort_id": self.benchmark_cohort_id,
+                    "market_snapshot_sha256": self.market_snapshot_sha256,
+                    "split_protocol_sha256": self.split_protocol_sha256,
+                }
+            )
+        return value
 
 
 @dataclass(frozen=True)
@@ -200,22 +320,44 @@ class TrainingConfig:
         return sha256_hex(canonical_json(self.to_dict()))
 
 
-def _validate_dataset(
-    observations: Sequence[Observation], feature_names: tuple[str, ...]
-) -> None:
-    if len(observations) < 2:
-        raise ValidationError("at least two observations are required")
+def _observation_arrays(
+    observations: Sequence[Observation] | ObservationMatrix,
+    feature_names: tuple[str, ...],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if len(feature_names) != len(set(feature_names)) or not feature_names:
         raise ValidationError("feature_names must be unique and non-empty")
     width = len(feature_names)
-    previous: datetime | None = None
-    for observation in observations:
-        if len(observation.features) != width:
+    if isinstance(observations, ObservationMatrix):
+        if observations.features.shape[1] != width:
             raise ValidationError("observation width does not match feature_names")
-        current = _utc(observation.observed_at, "observed_at")
-        if previous is not None and current <= previous:
-            raise ValidationError("observations must have strictly increasing timestamps")
-        previous = current
+        timestamps = np.asarray(observations.observed_at_ms, dtype=np.int64)
+        features = np.asarray(observations.features, dtype=np.float64)
+        labels = np.asarray(observations.labels, dtype=np.uint8)
+        returns = np.asarray(observations.forward_returns, dtype=np.float64)
+    else:
+        if len(observations) < 2:
+            raise ValidationError("at least two observations are required")
+        timestamps_list: list[int] = []
+        feature_rows: list[tuple[float, ...]] = []
+        labels_list: list[int] = []
+        returns_list: list[float] = []
+        previous: datetime | None = None
+        for observation in observations:
+            if len(observation.features) != width:
+                raise ValidationError("observation width does not match feature_names")
+            current = _utc(observation.observed_at, "observed_at")
+            if previous is not None and current <= previous:
+                raise ValidationError("observations must have strictly increasing timestamps")
+            previous = current
+            timestamps_list.append(round(current.timestamp() * 1_000))
+            feature_rows.append(tuple(float(value) for value in observation.features))
+            labels_list.append(int(observation.label))
+            returns_list.append(float(observation.forward_return))
+        timestamps = np.asarray(timestamps_list, dtype=np.int64)
+        features = np.asarray(feature_rows, dtype=np.float64)
+        labels = np.asarray(labels_list, dtype=np.uint8)
+        returns = np.asarray(returns_list, dtype=np.float64)
+        ObservationMatrix(timestamps, features, labels, returns)
     # Reuse the artifact format's stricter feature-name validation.
     try:
         FrozenLinearModel(
@@ -227,85 +369,85 @@ def _validate_dataset(
         )
     except ModelArtifactError as exc:
         raise ValidationError(str(exc)) from exc
+    return timestamps, features, labels, returns
+
+
+def _validate_dataset(
+    observations: Sequence[Observation] | ObservationMatrix,
+    feature_names: tuple[str, ...],
+) -> None:
+    _observation_arrays(observations, feature_names)
 
 
 def dataset_sha256(
-    observations: Sequence[Observation], feature_names: tuple[str, ...]
+    observations: Sequence[Observation] | ObservationMatrix,
+    feature_names: tuple[str, ...],
 ) -> str:
-    _validate_dataset(observations, feature_names)
-    return sha256_hex(
+    timestamps, features, labels, returns = _observation_arrays(
+        observations, feature_names
+    )
+    digest = hashlib.sha256()
+    digest.update(
         canonical_json(
             {
                 "feature_names": list(feature_names),
-                "observations": [
-                    {
-                        "features": list(row.features),
-                        "forward_return": row.forward_return,
-                        "label": row.label,
-                        "observed_at": _iso(row.observed_at),
-                    }
-                    for row in observations
-                ],
+                "hash_schema": "tideguard.observation-matrix.v1",
+                "rows": int(timestamps.shape[0]),
             }
-        )
+        ).encode("utf-8")
     )
+    digest.update(b"\n")
+    for array, dtype in (
+        (timestamps, "<i8"),
+        (features, "<f8"),
+        (labels, "u1"),
+        (returns, "<f8"),
+    ):
+        contiguous = np.ascontiguousarray(array, dtype=np.dtype(dtype))
+        digest.update(memoryview(contiguous).cast("B"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def fit_linear_model(
-    observations: Sequence[Observation],
+    observations: Sequence[Observation] | ObservationMatrix,
     feature_names: tuple[str, ...],
     config: TrainingConfig,
 ) -> FrozenLinearModel:
-    """Deterministic full-batch logistic regression for an offline candidate."""
+    """Deterministic single-thread full-batch logistic regression."""
 
-    _validate_dataset(observations, feature_names)
-    row_count = len(observations)
-    width = len(feature_names)
-    means = tuple(
-        sum(float(row.features[index]) for row in observations) / row_count
-        for index in range(width)
+    _timestamps, features, labels, _returns = _observation_arrays(
+        observations, feature_names
     )
-    variances = tuple(
-        sum((float(row.features[index]) - means[index]) ** 2 for row in observations)
-        / row_count
-        for index in range(width)
+    row_count = int(features.shape[0])
+    means_array = np.mean(features, axis=0, dtype=np.float64)
+    variances = np.mean(
+        np.square(features - means_array, dtype=np.float64),
+        axis=0,
+        dtype=np.float64,
     )
-    scales = tuple(math.sqrt(value) if value > 1e-18 else 1.0 for value in variances)
-    normalized = [
-        tuple(
-            (float(row.features[index]) - means[index]) / scales[index]
-            for index in range(width)
-        )
-        for row in observations
-    ]
-    weights = [0.0] * width
-    intercept = 0.0
+    scales_array = np.where(variances > 1e-18, np.sqrt(variances), 1.0)
+    normalized = np.ascontiguousarray(
+        (features - means_array) / scales_array,
+        dtype=np.float64,
+    )
+    weights = np.zeros(len(feature_names), dtype=np.float64)
+    intercept = np.float64(0.0)
+    labels_float = labels.astype(np.float64, copy=False)
     for _ in range(config.epochs):
-        gradient = [0.0] * width
-        intercept_gradient = 0.0
-        for row, values in zip(observations, normalized, strict=True):
-            linear = intercept + sum(
-                weight * value for weight, value in zip(weights, values, strict=True)
-            )
-            if linear >= 0:
-                probability = 1.0 / (1.0 + math.exp(-min(linear, 700.0)))
-            else:
-                exp_value = math.exp(max(linear, -700.0))
-                probability = exp_value / (1.0 + exp_value)
-            error = probability - row.label
-            intercept_gradient += error
-            for index, value in enumerate(values):
-                gradient[index] += error * value
-        intercept -= config.learning_rate * (intercept_gradient / row_count)
-        for index in range(width):
-            regularized = gradient[index] / row_count + config.l2 * weights[index]
-            weights[index] -= config.learning_rate * regularized
+        linear = np.clip(intercept + normalized @ weights, -700.0, 700.0)
+        probability = 1.0 / (1.0 + np.exp(-linear))
+        error = probability - labels_float
+        intercept_gradient = np.mean(error, dtype=np.float64)
+        gradient = normalized.T @ error / row_count + config.l2 * weights
+        intercept -= config.learning_rate * intercept_gradient
+        weights -= config.learning_rate * gradient
     return FrozenLinearModel(
         feature_names=feature_names,
-        means=means,
-        scales=scales,
-        coefficients=tuple(weights),
-        intercept=intercept,
+        means=tuple(float(value) for value in means_array),
+        scales=tuple(float(value) for value in scales_array),
+        coefficients=tuple(float(value) for value in weights),
+        intercept=float(intercept),
         buy_threshold=config.buy_threshold,
         sell_threshold=config.sell_threshold,
     )
@@ -417,16 +559,23 @@ class ValidationReport:
         if self.schema_version not in {
             LEGACY_VALIDATION_SCHEMA_VERSION,
             LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION,
+            LEGACY_BRACKET_VALIDATION_SCHEMA_VERSION,
             VALIDATION_SCHEMA_VERSION,
         } or not self.folds:
             raise ValidationError("unsupported or empty validation report")
         expected_mode = {
             LEGACY_VALIDATION_SCHEMA_VERSION: LEGACY_EVALUATION_MODE,
             LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION: LEGACY_LONG_ONLY_EVALUATION_MODE,
+            LEGACY_BRACKET_VALIDATION_SCHEMA_VERSION: LEGACY_BRACKET_EVALUATION_MODE,
             VALIDATION_SCHEMA_VERSION: LONG_ONLY_EVALUATION_MODE,
         }[self.schema_version]
         if self.evaluation_mode != expected_mode:
             raise ValidationError("validation evaluation semantics do not match the schema")
+        if self.schema_version == VALIDATION_SCHEMA_VERSION:
+            if not self.walk_forward_spec.is_v4:
+                raise ValidationError("v4 validation requires a bound benchmark cohort")
+        elif self.walk_forward_spec.is_v4:
+            raise ValidationError("legacy validation cannot contain v4 cohort fields")
         if self.oos_rows != sum(fold.test_rows for fold in self.folds):
             raise ValidationError("aggregate OOS row count is inconsistent")
         if self.trades != sum(fold.trades for fold in self.folds):
@@ -474,6 +623,22 @@ class ValidationReport:
     def validation_run_id(self) -> str:
         return f"val_{self.report_sha256[:24]}"
 
+    @property
+    def benchmark_cohort_id(self) -> str | None:
+        return self.walk_forward_spec.benchmark_cohort_id
+
+    @property
+    def market_snapshot_sha256(self) -> str | None:
+        return self.walk_forward_spec.market_snapshot_sha256
+
+    @property
+    def split_protocol_sha256(self) -> str | None:
+        return (
+            self.walk_forward_spec.split_protocol_sha256
+            if self.walk_forward_spec.is_v4
+            else None
+        )
+
     @classmethod
     def from_dict(cls, value: Any) -> ValidationReport:
         base_expected = {
@@ -497,6 +662,7 @@ class ValidationReport:
         schema_version = str(value.get("schema_version", ""))
         if schema_version in {
             VALIDATION_SCHEMA_VERSION,
+            LEGACY_BRACKET_VALIDATION_SCHEMA_VERSION,
             LEGACY_LONG_ONLY_VALIDATION_SCHEMA_VERSION,
         }:
             expected = base_expected | {"evaluation_mode"}
@@ -509,31 +675,58 @@ class ValidationReport:
         if set(value) != expected:
             raise ValidationError("validation report has missing or unexpected fields")
         spec_value = value["walk_forward_spec"]
-        if not isinstance(spec_value, dict) or set(spec_value) != {
+        legacy_spec_fields = {
             "embargo_size",
             "expanding",
             "label_horizon",
             "step_size",
             "test_size",
             "train_size",
-        }:
+        }
+        v4_spec_fields = legacy_spec_fields | {
+            "benchmark_cohort_id",
+            "market_snapshot_sha256",
+            "split_protocol_sha256",
+        }
+        expected_spec_fields = (
+            v4_spec_fields
+            if schema_version == VALIDATION_SCHEMA_VERSION
+            else legacy_spec_fields
+        )
+        if not isinstance(spec_value, dict) or set(spec_value) != expected_spec_fields:
             raise ValidationError("walk-forward specification is invalid")
         if not isinstance(spec_value["expanding"], bool):
             raise ValidationError("walk-forward expanding must be boolean")
         try:
+            spec = WalkForwardSpec(
+                train_size=int(spec_value["train_size"]),
+                test_size=int(spec_value["test_size"]),
+                step_size=int(spec_value["step_size"]),
+                embargo_size=int(spec_value["embargo_size"]),
+                label_horizon=int(spec_value["label_horizon"]),
+                expanding=spec_value["expanding"],
+                benchmark_cohort_id=(
+                    str(spec_value["benchmark_cohort_id"])
+                    if schema_version == VALIDATION_SCHEMA_VERSION
+                    else None
+                ),
+                market_snapshot_sha256=(
+                    str(spec_value["market_snapshot_sha256"])
+                    if schema_version == VALIDATION_SCHEMA_VERSION
+                    else None
+                ),
+            )
+            if schema_version == VALIDATION_SCHEMA_VERSION and not hmac.compare_digest(
+                spec.split_protocol_sha256,
+                str(spec_value["split_protocol_sha256"]),
+            ):
+                raise ValidationError("walk-forward split protocol hash mismatch")
             return cls(
                 created_at=_parse_iso(value["created_at"], "created_at"),
                 dataset_sha256=str(value["dataset_sha256"]),
                 feature_schema_sha256=str(value["feature_schema_sha256"]),
                 training_config_sha256=str(value["training_config_sha256"]),
-                walk_forward_spec=WalkForwardSpec(
-                    train_size=int(spec_value["train_size"]),
-                    test_size=int(spec_value["test_size"]),
-                    step_size=int(spec_value["step_size"]),
-                    embargo_size=int(spec_value["embargo_size"]),
-                    label_horizon=int(spec_value["label_horizon"]),
-                    expanding=spec_value["expanding"],
-                ),
+                walk_forward_spec=spec,
                 round_trip_cost_bps=float(value["round_trip_cost_bps"]),
                 folds=tuple(FoldMetrics.from_dict(item) for item in value["folds"]),
                 oos_rows=int(value["oos_rows"]),
@@ -553,7 +746,7 @@ class ValidationReport:
 
 def _evaluate_fold(
     model: FrozenLinearModel,
-    rows: Sequence[Observation],
+    rows: Sequence[Observation] | ObservationMatrix,
     feature_names: tuple[str, ...],
     cost_bps: float,
     holding_period_bars: int,
@@ -568,6 +761,120 @@ def _evaluate_fold(
 
     if holding_period_bars < 1 or len(rows) <= holding_period_bars:
         raise ValidationError("test fold is too short for the fixed holding period")
+    matrix_values: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+    if isinstance(rows, ObservationMatrix):
+        _timestamps, features_array, labels_array, returns_array = _observation_arrays(
+            rows, feature_names
+        )
+        means = np.asarray(model.means, dtype=np.float64)
+        scales = np.asarray(model.scales, dtype=np.float64)
+        coefficients = np.asarray(model.coefficients, dtype=np.float64)
+        normalized = (features_array - means) / scales
+        linear = np.clip(model.intercept + normalized @ coefficients, -700.0, 700.0)
+        scores = 1.0 / (1.0 + np.exp(-linear))
+        matrix_values = labels_array, returns_array, scores
+    if matrix_values is None:
+        trades = 0
+        correct = 0
+        evaluated_rows = 0
+        equity = 1.0
+        gross_equity = 1.0
+        peak = 1.0
+        max_drawdown = 0.0
+        cost = cost_bps / 10_000.0
+        cursor = 0
+        entry_stop = len(rows) - holding_period_bars
+        while cursor < entry_stop:
+            row = rows[cursor]
+            features = dict(zip(feature_names, row.features, strict=True))
+            action, _score = model.action(features)
+            buy = action == "buy"
+            correct += int(int(buy) == row.label)
+            evaluated_rows += 1
+            if not buy:
+                cursor += 1
+                continue
+            gross = row.forward_return
+            net = gross - cost
+            trades += 1
+            gross_equity *= max(0.0, 1.0 + gross)
+            equity *= max(0.0, 1.0 + net)
+            peak = max(peak, equity)
+            drawdown = (peak - equity) / peak if peak else 1.0
+            max_drawdown = max(max_drawdown, drawdown)
+            cursor += holding_period_bars
+        return (
+            trades,
+            correct / evaluated_rows,
+            gross_equity - 1.0,
+            equity - 1.0,
+            max_drawdown,
+            evaluated_rows,
+        )
+    labels_array, returns_array, scores = matrix_values
+    return evaluate_score_vector(
+        labels_array,
+        returns_array,
+        scores,
+        buy_threshold=float(getattr(model, "buy_threshold", 0.6)),
+        cost_bps=cost_bps,
+        holding_period_bars=holding_period_bars,
+    )
+
+
+def evaluate_score_vector(
+    labels: Sequence[int] | np.ndarray,
+    forward_returns: Sequence[float] | np.ndarray,
+    scores: Sequence[float] | np.ndarray,
+    *,
+    buy_threshold: float,
+    cost_bps: float,
+    holding_period_bars: int,
+) -> tuple[int, float, float, float, float, int]:
+    """Evaluate frozen probability scores with the production v4 semantics.
+
+    This is the only supported bridge for third-party research models.  It
+    accepts predictions, never executable model objects, and applies the same
+    cash-SPOT long/flat, non-overlapping-capital and cost rules as native
+    candidates.
+    """
+
+    labels_array = np.asarray(labels)
+    returns_array = np.asarray(forward_returns, dtype=np.float64)
+    scores_array = np.asarray(scores, dtype=np.float64)
+    if (
+        labels_array.ndim != 1
+        or returns_array.ndim != 1
+        or scores_array.ndim != 1
+        or labels_array.shape != returns_array.shape
+        or labels_array.shape != scores_array.shape
+    ):
+        raise ValidationError("score evaluation vectors must be aligned and one-dimensional")
+    if labels_array.size <= holding_period_bars or holding_period_bars < 1:
+        raise ValidationError("score evaluation window is too short")
+    if (
+        isinstance(buy_threshold, bool)
+        or not math.isfinite(float(buy_threshold))
+        or not 0.5 < float(buy_threshold) < 1.0
+    ):
+        raise ValidationError("score evaluation buy threshold is invalid")
+    if (
+        isinstance(cost_bps, bool)
+        or not math.isfinite(float(cost_bps))
+        or not 0.0 < float(cost_bps) <= 1_000.0
+    ):
+        raise ValidationError("score evaluation cost is invalid")
+    if (
+        np.any((labels_array != 0) & (labels_array != 1))
+        or not np.all(np.isfinite(returns_array))
+        or np.any(returns_array <= -1.0)
+        or np.any(returns_array > 1.0)
+        or not np.all(np.isfinite(scores_array))
+        or np.any(scores_array < 0.0)
+        or np.any(scores_array > 1.0)
+    ):
+        raise ValidationError("score evaluation vectors contain invalid values")
+
     trades = 0
     correct = 0
     evaluated_rows = 0
@@ -575,21 +882,17 @@ def _evaluate_fold(
     gross_equity = 1.0
     peak = 1.0
     max_drawdown = 0.0
-    cost = cost_bps / 10_000.0
+    cost = float(cost_bps) / 10_000.0
     cursor = 0
-    entry_stop = len(rows) - holding_period_bars
+    entry_stop = int(labels_array.size) - holding_period_bars
     while cursor < entry_stop:
-        row = rows[cursor]
-        features = dict(zip(feature_names, row.features, strict=True))
-        action, _score = model.action(features)
-        predicted_label = 1 if action == "buy" else 0
-        correct += int(predicted_label == row.label)
+        buy = float(scores_array[cursor]) >= float(buy_threshold)
+        correct += int(int(buy) == int(labels_array[cursor]))
         evaluated_rows += 1
-        if action != "buy":
+        if not buy:
             cursor += 1
             continue
-
-        gross = row.forward_return
+        gross = float(returns_array[cursor])
         net = gross - cost
         trades += 1
         gross_equity *= max(0.0, 1.0 + gross)
@@ -609,7 +912,7 @@ def _evaluate_fold(
 
 
 def run_walk_forward(
-    observations: Sequence[Observation],
+    observations: Sequence[Observation] | ObservationMatrix,
     feature_names: tuple[str, ...],
     spec: WalkForwardSpec,
     config: TrainingConfig,
@@ -629,8 +932,20 @@ def run_walk_forward(
     aggregate_peak = 1.0
     aggregate_max_drawdown = 0.0
     for fold in folds:
-        train_rows = observations[fold.train_start : fold.train_stop]
-        test_rows = observations[fold.test_start : fold.test_stop]
+        if isinstance(observations, ObservationMatrix):
+            train_rows = observations.window(fold.train_start, fold.train_stop)
+            test_rows = observations.window(fold.test_start, fold.test_stop)
+            train_start_at = train_rows.observed_at(0)
+            train_stop_at = train_rows.observed_at(len(train_rows) - 1)
+            test_start_at = test_rows.observed_at(0)
+            test_stop_at = test_rows.observed_at(len(test_rows) - 1)
+        else:
+            train_rows = observations[fold.train_start : fold.train_stop]
+            test_rows = observations[fold.test_start : fold.test_stop]
+            train_start_at = train_rows[0].observed_at
+            train_stop_at = train_rows[-1].observed_at
+            test_start_at = test_rows[0].observed_at
+            test_stop_at = test_rows[-1].observed_at
         model = fit_linear_model(train_rows, feature_names, config)
         trades, accuracy, gross_return, net_return, max_drawdown, evaluated_rows = _evaluate_fold(
             model,
@@ -642,10 +957,10 @@ def run_walk_forward(
         fold_metrics.append(
             FoldMetrics(
                 fold=fold.fold,
-                train_start_at=train_rows[0].observed_at,
-                train_stop_at=train_rows[-1].observed_at,
-                test_start_at=test_rows[0].observed_at,
-                test_stop_at=test_rows[-1].observed_at,
+                train_start_at=train_start_at,
+                train_stop_at=train_stop_at,
+                test_start_at=test_start_at,
+                test_stop_at=test_stop_at,
                 train_rows=len(train_rows),
                 test_rows=len(test_rows),
                 trades=trades,
@@ -667,6 +982,16 @@ def run_walk_forward(
             else 1.0
         )
         aggregate_max_drawdown = max(aggregate_max_drawdown, max_drawdown, drawdown)
+    schema_version = (
+        VALIDATION_SCHEMA_VERSION
+        if spec.is_v4
+        else LEGACY_BRACKET_VALIDATION_SCHEMA_VERSION
+    )
+    evaluation_mode = (
+        LONG_ONLY_EVALUATION_MODE
+        if spec.is_v4
+        else LEGACY_BRACKET_EVALUATION_MODE
+    )
     return ValidationReport(
         created_at=_utc(created_at, "created_at"),
         dataset_sha256=dataset_sha256(observations, feature_names),
@@ -681,5 +1006,6 @@ def run_walk_forward(
         aggregate_net_return=aggregate_equity - 1.0,
         max_drawdown=aggregate_max_drawdown,
         worst_fold_net_return=min(fold.net_return for fold in fold_metrics),
-        evaluation_mode=LONG_ONLY_EVALUATION_MODE,
+        evaluation_mode=evaluation_mode,
+        schema_version=schema_version,
     )

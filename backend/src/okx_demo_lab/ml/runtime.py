@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..audit import AuditStore
+from ..build_info import BUILD_REVISION
 from ..okx_client import OkxClient
 from ..secrets import credentials_configured
 from ..service import TradingService
@@ -133,7 +134,7 @@ class MLCoordinator:
             )
         return {
             "engine": {
-                "name": "Tideguard Native Linear Logit",
+                "name": "MOHENG Native Linear Logit",
                 "artifactFormat": "canonical-json-data-only",
                 "featureContractSha256": feature_contract_sha256(),
                 "trainingMode": "offline-on-demand",
@@ -180,7 +181,7 @@ class MLCoordinator:
             if len(raw) < candle_limit:
                 raise MLRuntimeError("OKX did not return the requested completed candle history")
             now = _utc_now()
-            revision = os.environ.get("TIDEGUARD_BUILD_REVISION", "tideguard-0.3.0")
+            revision = os.environ.get("TIDEGUARD_BUILD_REVISION", BUILD_REVISION)
             result = await asyncio.to_thread(
                 train_and_register_candidate,
                 raw,

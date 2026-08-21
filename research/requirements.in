@@ -1,0 +1,9 @@
+# Offline research only. These packages are never bundled into the desktop EXE
+# and never receive OKX credentials or an execution port.
+catboost==1.2.10
+cryptofeed==2.4.1
+lightgbm==4.7.0
+quantstats==0.0.81
+scikit-learn==1.9.0
+xgboost==3.2.0
+vaderSentiment==3.3.2

@@ -1,4 +1,56 @@
-# Tideguard v0.3 验证记录
+# 墨衡 MOHENG v0.4 验证记录
+
+验证日期：2026-08-21。v0.4 将公共品牌、全历史研究仓库、v4 rolling walk-forward、Codex 监督门、Demo/Live 环境隔离和 Windows 发行链放在同一次可复核验收中。收益指标只用于拒绝或晋级模型，不构成收益保证。
+
+## 离线与界面验收
+
+- `scripts/check.ps1`：后端 `164 passed`；桌面宿主 `16 passed`；Windows 发行契约 `6 passed`；前端环境/高风险交互契约 `13 passed`；TypeScript 和 Vite 生产构建通过。
+- 历史终点、内部 gap 恢复、快照失效、Supervisor/lease/执行门的独立定向复核为 `103 passed`，未发现剩余 P0/P1/P2。
+- 墨衡运行中心、数据、训练、模型、执行、审计设置六条主路径均完成桌面与 `375px` 移动验收；无页面级横向溢出，移动主交互最小高度 44px，浏览器控制台为 0 error。
+- Demo/Live 环境未知、子请求失败、切换中、重启待生效均失败关闭；Live 使用永久朱砂风险语义、服务器倒计时、四项确认和逐字短语。Live 自动量化仍硬禁用，只开放 60 秒、10 USDT、1 挂单的独立人工授权。
+
+## 真实 OKX 公共历史与首轮 v4 训练
+
+- 公共 `BTC-USDT / SPOT / 5m` 仓库完成两阶段历史终点确认；最终 `905,294` 根，UTC `2018-01-11 11:10` 至 `2026-08-20 20:15`，缺口 `0`、未解决冲突 `0`。
+- 内容快照：`dset_08123b986d947c9af478b8f5`；SHA-256 `08123b986d947c9af478b8f5b135d8e92b271315cca295d74fafeff7113c1319`。
+- 第一次空页只产生 `HistoryOriginUnconfirmed`，没有快照或训练；至少 60 秒后用不同游标和 `limit=100` 再次为空，才完成仓库。公共请求不携带 Demo 私有头。
+- 三组候选均绑定代码提交 `34b9537f783f6f3c1ed558bfb853bc38f14686df`、同一快照、同一 30 折 rolling 协议和 `777,600` 个 OOS 行。
+
+| 模型 | OOS 交易 | 扣成本净结果 | 最大回撤 | 最弱折 | 结论 |
+|---|---:|---:|---:|---:|---|
+| `mdl_36e55422de66abefab9eb9e8` | 3,799 | -99.9939% | 99.9939% | -63.6672% | 拒绝 |
+| `mdl_9c4c032e678be0c526ed9688` | 2,042 | -99.5359% | 99.5359% | -47.3966% | 拒绝 |
+| `mdl_e4932366ff58f73142cb6985` | 1,299 | -95.6532% | 95.6532% | -35.2676% | 拒绝 |
+
+三者虽有约 75% 的 aggregate accuracy，但全部失败于净结果、最弱时间折和回撤硬门，已由 Codex Supervisor 逐个落盘为 `rejected`。最终 `champion=null`、长期 master disabled、无模型持仓、无订单。
+
+## 真实 Demo 只读连接
+
+- 本机凭证仍只在 Windows Credential Manager；项目、SQLite、日志、安装包均不含原始 Key/Secret/Passphrase。
+- 真实 Demo 只读连接结果：public=true、privateReachable=true、policyValid=true、environment=demo；审计链有效，safety=observe。
+- 本轮没有 arm、preview、commit、下单、撤单或切换 Live；Live 只通过 mock/故障注入和契约测试验证，不能把它表述为真实资金交易验证。
+
+## Windows v0.4 发行与安装
+
+- 最终发行构建来自提交 `c8086dcf1888d392afd16eb61cd43fe0ba5077fe`；manifest 记录 `sourceTreeDirty=false`、`credentialsBundled=false`。ZIP 解包后 `276/276` 个文件逐项大小和 SHA-256 一致，无缺失、无额外文件；包含 MIT `LICENSE` 与 `THIRD-PARTY-NOTICES.md`。
+- `Tideguard.exe` 为 AMD64 Windows GUI 子系统，`FileVersion=ProductVersion=0.4.0`，`ProductName=墨衡 MOHENG`；冻结离线 `--self-test` 返回 `0`。
+
+| 文件 | 大小 | SHA-256 |
+|---|---:|---|
+| `Moheng-Setup-0.4.0.exe` | 29,191,715 | `aa24f0d44c4c2022d6a8cf067e101496d2dbf1e0ea9c146c5e2d7eea31325e32` |
+| `Moheng-0.4.0-windows-x64.zip` | 34,847,430 | `c850325aa896a933ca1ecd3748aadd160c47d7c3d065f34af7e8028fef6db7a0` |
+| `Moheng-0.4.0-manifest.json` | 52,523 | `0369f26a08f871416f63e2e6afa29dc63a02746820d13da7b27d6d766c416cf8` |
+| `SHA256SUMS.txt` | 280 | `286ed38f14fea5907d12be6d8a4e9d0d87e114311a6dcbe419d76c5b7ef7e645` |
+
+- 本机静默覆盖安装退出码为 `0`；安装后冻结自检为 `0`，四个开始菜单入口存在。Demo 凭证安装前后均可由原生凭证库读取；`market-data.sqlite3` 安装前后 SHA-256 均为 `184c3546b8b228e7305391129763e933f51bf808d5d074f3ddcc8326488ddd43`，说明安装器没有改写训练数据。
+- 使用同一提交和 Python 3.11.15 运行本地后端，真实 Demo 只读复核再次得到 `public=true`、`privateReachable=true`、`policyValid=true`、零 pending orders；仓库仍为 905,294 根、零缺口、零冲突，champion 与执行 permit 均为空。
+- 本机火绒联网控制对尚未代码签名的冻结 `Tideguard.exe` 做了静默联网处置，因此在 Codex 启动的冻结进程中无法完成 OKX 出站验证；源码后端不受影响。Codex 没有修改或绕过杀毒/防火墙策略。用户需在火绒中手动允许“墨衡 MOHENG”联网后，才能把“独立冻结安装版已连接 OKX”标记为通过；在此之前该项保持未验证，Draft PR 不得发布正式 Release。
+
+---
+
+# Tideguard v0.3 历史验证记录
+
+> 历史归档：以下是 v0.3 当时实际完成的验证，不是墨衡 v0.4 发布证明。v0.4 的最终测试、安装升级和历史训练结果将在本轮验收后另行追加，旧结论不得外推到 Live 路径。
 
 验证日期：2026-08-20。本文只记录已实际运行的检查；历史回放、公共行情、安装验收和模拟盘私有订单验证严格区分。
 

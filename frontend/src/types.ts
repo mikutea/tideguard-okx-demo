@@ -4,7 +4,8 @@ export interface SystemStatus {
   app: string;
   version: string;
   environment: string;
-  demoHeader: string;
+  environmentProfile?: EnvironmentStatus;
+  demoHeader: string | null;
   baseUrl: string;
   bind: string;
   credentialConfigured: boolean;
@@ -129,6 +130,305 @@ export interface PreviewResult {
   };
 }
 
+export type EnvironmentMode = "demo" | "live" | "unknown";
+export type EnvironmentTarget = Exclude<EnvironmentMode, "unknown">;
+
+export interface EnvironmentStatus {
+  activeEnvironment: EnvironmentTarget;
+  activeDisplayName: string;
+  configuredEnvironment: EnvironmentTarget;
+  restartRequired: boolean;
+  transitionPending?: boolean;
+  transitionTarget?: EnvironmentTarget | null;
+  selectorValid: boolean;
+  selectorError: string | null;
+  switchId: string | null;
+  updatedAt: string | null;
+  operatingMode: "observe" | "runtime" | "transition_locked";
+  credentialConfigured?: boolean;
+  credentialService?: string;
+  orderTag?: string;
+  simulatedTradingHeader?: boolean;
+  liveManualTradingAvailable?: boolean;
+  liveAutomationAvailable?: boolean;
+  independentLiveAuthorizationRequired?: boolean;
+}
+
+export interface EnvironmentPreflightCheck {
+  key: string;
+  label?: string;
+  passed: boolean;
+  detail?: string | null;
+}
+
+export interface EnvironmentPreflight {
+  source: EnvironmentTarget;
+  target: EnvironmentTarget;
+  allowed: boolean;
+  checks: EnvironmentPreflightCheck[];
+  preflightSha256: string;
+  binding?: {
+    currentCredentialFingerprint: string | null;
+    currentAccountFingerprint: string | null;
+    targetCredentialFingerprint: string | null;
+    targetAccountFingerprint: string | null;
+  };
+}
+
+export interface EnvironmentChallenge {
+  nonce: string;
+  source: EnvironmentTarget;
+  target: EnvironmentTarget;
+  confirmationPhrase: string;
+  issuedAt: string;
+  readyAt: string;
+  expiresAt: string;
+  requiredAcknowledgements: Array<keyof EnvironmentAcknowledgements>;
+  preflight: EnvironmentPreflight;
+}
+
+export interface EnvironmentAcknowledgements {
+  automationStopped: boolean;
+  noOutstandingState: boolean;
+  restartRequired: boolean;
+  liveFundsAtRisk: boolean;
+}
+
+export interface EnvironmentSwitchResult extends EnvironmentStatus {
+  source: EnvironmentTarget;
+  target: EnvironmentTarget;
+  killActive: boolean;
+  targetKillActive: boolean;
+}
+
+export interface FoldMetric {
+  fold: number;
+  startAt: string | null;
+  endAt: string | null;
+  netReturn: number | null;
+  maxDrawdown: number | null;
+  trades: number | null;
+  status: "pass" | "fail" | "unknown";
+}
+
+export interface ResearchStatus {
+  dataset?: {
+    source: string;
+    instrument: string;
+    bar: string;
+    confirmedRows: number;
+    targetRows: number | null;
+    earliestAt: string | null;
+    latestAt: string | null;
+    gaps: number | null;
+    conflicts: number | null;
+    snapshotSha256: string | null;
+    lastErrorType: string | null;
+    syncState: "idle" | "running" | "complete" | "failed";
+    updatedAt: string | null;
+  };
+  training?: {
+    stage: "idle" | "syncing" | "snapshotting" | "feature_build" | "walk_forward" | "final_fit" | "registering" | "completed" | "failed";
+    progress: number | null;
+    cpuPercent: number | null;
+    memoryMb: number | null;
+    elapsedSeconds: number | null;
+    nextRunAt: string | null;
+  };
+  walkForward?: Record<string, FoldMetric[]>;
+}
+
+export interface ResearchMonitorStatus {
+  schemaVersion: string;
+  available: boolean;
+  generatedAt: string;
+  storageRoot: string | null;
+  safety: {
+    executionAllowlist: string[];
+    orderCapability: boolean;
+    privateApi: boolean;
+    publicDataOnly: boolean;
+  };
+  universe: null | {
+    createdAt: string | null;
+    members: string[];
+    policySha256: string | null;
+    reportSha256: string | null;
+    snapshotSha256: string | null;
+    valid: boolean;
+  };
+  history: null | {
+    active: boolean;
+    databaseBytes: number;
+    instruments: Array<{
+      backfillComplete: boolean;
+      coverageDays: number;
+      firstOpenTsMs: number | null;
+      instrument: string;
+      lastOpenTsMs: number | null;
+      listedAt: string | null;
+      missingBars: number;
+      pagesConsumed: number;
+      rowsInsertedThisRun: number;
+      stage: string;
+      storedRowsAtCheckpoint: number;
+      unresolvedConflicts: number;
+    }>;
+    pageBudget: number;
+    pagesConsumed: number;
+    runId: string | null;
+    startedAt: string | null;
+    state: string;
+    universeMatch: boolean;
+    updatedAt: string | null;
+  };
+  signals: {
+    available: boolean;
+    databaseBytes?: number;
+    fullTextStored?: boolean;
+    orderCapability?: boolean;
+    source?: string;
+  };
+  cohort: null | {
+    blockers: string[];
+    cohortId: string | null;
+    contentSha256: string | null;
+    createdAt: string | null;
+    instruments: string[];
+    manifestValid: boolean;
+    promotable: boolean;
+    rowCount: number;
+  };
+  benchmark: null | {
+    benchmarkId: string | null;
+    blockers: string[];
+    cohortId: string | null;
+    completedAt: string | null;
+    developmentGatePassed: boolean;
+    evaluationScope: string | null;
+    exploratoryGatePassed: boolean;
+    promotable: boolean;
+    reportSha256: string | null;
+    results: Array<{
+      calibrationImproved: boolean;
+      cashBarRate: number | null;
+      chosenPolicy: null | {
+        edgeBufferBps: number | null;
+        minEntrySpacingBars: number | null;
+        requiredGrossReturnBps: number | null;
+      };
+      chosenThreshold: number | null;
+      developmentGatePassed: boolean;
+      exploratoryGatePassed: boolean;
+      family: string | null;
+      grossReturn: number | null;
+      maxDrawdown: number | null;
+      maxInstrumentTradeShare: number | null;
+      netReturn: number | null;
+      trades: number;
+      tradesPerDay: number | null;
+    }>;
+    schemaVersion: string | null;
+    valid: boolean;
+  };
+  replay: HistoricalReplayStatus | null;
+  blockers: string[];
+}
+
+export interface HistoricalReplayStatus {
+  blockers: string[];
+  calibrationImproved: boolean;
+  capacityHandling: string | null;
+  cashBarRate: number | null;
+  checkpoints: Array<{
+    at: string;
+    cash: number | null;
+    drawdown: number | null;
+    equity: number | null;
+    positionInstrument: string | null;
+    positionMarketValue: number | null;
+  }>;
+  chosenPolicy: null | {
+    edgeBufferBps: number | null;
+    minEntrySpacingBars: number | null;
+    requiredGrossReturnBps: number | null;
+  };
+  cohortId: string | null;
+  completedAt: string | null;
+  compressionMultiple: number | null;
+  decision: string | null;
+  developmentGatePassed: boolean;
+  developmentHistoryAlreadyObserved: boolean;
+  episodeCount: number;
+  episodes: Array<{
+    assetRows: number;
+    availableAt: string | null;
+    calibratedBrier: number | null;
+    calibrationRows: number;
+    calibrationStartAt: string | null;
+    calibrationStopAt: string | null;
+    episode: number;
+    episodeId: string | null;
+    fitRows: number;
+    fitStartAt: string | null;
+    fitStopAt: string | null;
+    labelCompleteAt: string | null;
+    rawBrier: number | null;
+    replayRows: number;
+    replayStartAt: string | null;
+    replayStopAt: string | null;
+    trainingSeconds: number | null;
+  }>;
+  executionSlice: null | {
+    developmentGatePassed: boolean;
+    failures: string[];
+    instrument: string | null;
+    maxDrawdown: number | null;
+    netReturn: number | null;
+    stressNetReturn: number | null;
+    trades: number;
+  };
+  executionSemantics: "corrected_next_open_boundary" | "legacy_or_pre_v6";
+  family: string | null;
+  finalCash: number | null;
+  firstReplayAt: string | null;
+  lastReplayAt: string | null;
+  maxDrawdown: number | null;
+  netReturn: number | null;
+  independentVerificationRequired: boolean;
+  monitorContractValid: boolean;
+  ordersClipped: number;
+  ordersRejected: number;
+  ordinaryCostBps: number | null;
+  promotable: boolean;
+  replayId: string | null;
+  reportSha256: string | null;
+  retiredSemanticMismatch: boolean;
+  retrainEveryDays: number | null;
+  schemaVersion: string | null;
+  shadowDaysCredited: number;
+  selectionBiasWarning: boolean;
+  simulatedDays: number | null;
+  startingCash: number | null;
+  stressNetReturn: number | null;
+  totalEstimatedSlippageCost: number | null;
+  targetExecutionAligned: boolean;
+  totalFees: number | null;
+  totalWallSeconds: number | null;
+  tradeCount: number;
+  trades: Array<{
+    enteredAt?: string;
+    episodeId?: string;
+    exitedAt?: string;
+    instrument?: string;
+    netPnl?: number;
+    tradeId?: string;
+  }>;
+  tradesPerDay: number | null;
+  turnoverMultiple: number | null;
+  valid: boolean;
+}
+
 export interface MLModelSummary {
   modelId: string;
   artifactSha256: string;
@@ -235,6 +535,9 @@ export interface LongRunPosition {
 export interface SupervisorModelReview {
   modelId: string;
   artifactSha256: string;
+  trainingConfigSha256: string | null;
+  comparisonBaselineModelId: string | null;
+  comparisonBaselineCohort: string | null;
   state: MLModelSummary["state"];
   trainer: string;
   createdAt: string;
@@ -244,13 +547,19 @@ export interface SupervisorModelReview {
   comparisonFailures: string[];
   metrics: null | {
     aggregateAccuracy: number;
+    benchmarkCohortId: string | null;
+    evaluationDatasetSha256: string;
     evaluationMode: string;
     folds: number;
     maxDrawdown: number;
+    marketSnapshotSha256: string | null;
     netReturn: number;
     oosRows: number;
     reportSha256: string;
     roundTripCostBps: number;
+    splitProtocolSha256: string | null;
+    testFrom: string;
+    testThrough: string;
     trades: number;
     worstFoldNetReturn: number;
   };
@@ -262,6 +571,9 @@ export interface SupervisorModelReview {
     durationDays: number;
     firstSignalAt: string | null;
     lastSettledAt: string | null;
+    protocolVersion: string;
+    policySha256: string | null;
+    excludedLegacyOrPolicyMismatch: number;
   };
 }
 
@@ -284,7 +596,49 @@ export interface LongRunStatus {
     status: "running" | "completed" | "failed";
     modelId: string | null;
     errorType: string | null;
+    phase: "syncing" | "snapshotting" | "feature_build" | "walk_forward" | "final_fit" | "registering" | "completed" | "failed";
+    progressCurrent: number;
+    progressTotal: number | null;
+    snapshotId: string | null;
+    dataRows: number | null;
     result: Record<string, unknown> | null;
+  };
+  dataWarehouse: {
+    backfillComplete: boolean;
+    bar: string;
+    coverageDays: number;
+    cursorTsMs: number | null;
+    diskBytes: number;
+    expectedRows: number;
+    firstOpenAt: string | null;
+    firstOpenTsMs: number | null;
+    instrument: string;
+    lastErrorType: string | null;
+    lastClosedAt: string | null;
+    lastOpenAt: string | null;
+    lastOpenTsMs: number | null;
+    lastSyncAt: string | null;
+    latestSnapshot: null | {
+      schemaVersion: string;
+      source: string;
+      instrument: string;
+      bar: string;
+      firstOpenAt: string;
+      lastOpenAt: string;
+      rowCount: number;
+      snapshotId: string;
+      contentSha256: string;
+      featureContractSha256: string;
+      createdAt: string;
+    };
+    missingBars: number;
+    pagesFetched: number;
+    rowsInserted: number;
+    schemaVersion: string;
+    source: string;
+    storedRows: number;
+    syncStatus: "idle" | "syncing" | "partial" | "error";
+    unresolvedConflicts: number;
   };
   recentDecisions: Array<{
     decisionId: string;
@@ -340,6 +694,23 @@ export interface LongRunStatus {
     championSupervisorApproved: boolean;
     demoPerformance: LongRunStatus["demoPerformance"];
     generation: number;
+    liveReadiness: {
+      automatedLiveExecutionEnabled: false;
+      deploymentBlockers: string[];
+      evidenceFailures: string[];
+      evidenceGatePassed: boolean;
+      modelId: string | null;
+      policy: {
+        maxDrawdown: string;
+        minimumDemoClosedPositions: number;
+        minimumProspectiveShadowBuys: number;
+        minimumProspectiveShadowDays: number;
+        requiresPositiveDemoNetReturn: boolean;
+        requiresPositiveShadowNetReturn: boolean;
+        shadowProtocolVersion: string | null;
+      };
+      readyForLive: false;
+    };
     models: SupervisorModelReview[];
   };
   lastError: null | {

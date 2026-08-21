@@ -1,5 +1,7 @@
 # GitHub 现成 AI 量化项目审计
 
+> 历史归档：本文记录 v0.2–v0.3 的选型与当时边界，不代表 v0.4 当前能力。v0.4 的环境隔离、Live 人工路径与长期 Demo 架构请以 `README.md`、`LIVE-SAFETY.md` 和 `AUTONOMY-ARCHITECTURE.md` 为准。
+
 核对日期：2026-08-14；v0.3 执行边界更新于 2026-08-20。这里只记录可从项目源码、许可证和官方文档复核的事实。
 
 ## 结论
@@ -19,7 +21,7 @@
 - 只允许现货 cash，且代码中不存在实盘切换；
 - 两阶段确认、确定性风控、超时对账和哈希审计。
 
-因此潮汐台不整体复制这些机器人。当前实现一个可审计的原生线性基线，用真实 OKX 公共 K 线训练、时间隔离验证并产出冻结建议意图；唯一执行入口仍是原有 OKX Demo 风控链。FreqAI 只保留“独立 dry-run 进程 → localhost 冻结信号”的可选边界，不随安装器捆绑。
+因此墨衡不整体复制这些机器人。当前实现一个可审计的原生线性基线，用真实 OKX 公共 K 线训练、时间隔离验证并产出冻结建议意图；唯一执行入口仍是原有 OKX Demo 风控链。FreqAI 只保留“独立 dry-run 进程 → localhost 冻结信号”的可选边界，不随安装器捆绑。
 
 ## 候选
 
@@ -28,7 +30,7 @@
 | [Freqtrade + FreqAI](https://github.com/freqtrade/freqtrade) / [FreqUI](https://github.com/freqtrade/frequi) | 机器学习特征、训练、预测、回测、dry-run；UI 成熟 | 官方 FAQ 明确不支持交易所 sandbox；dry-run 订单不会发到 OKX Demo。GPL-3.0 | 后续作为离线/Shadow 信号引擎，不作为 OKX Demo 执行器 |
 | [OctoBot](https://github.com/Drakkar-Software/OctoBot) | 自动策略、LLM/Ollama 评估器、Web UI、内部模拟 | 当前源码 `Okx.is_supporting_sandbox()` 返回 `False`；不能把内部 simulator 当 OKX 官方 Demo。GPL-3.0 | 可单独体验 AI 模式，不接这把 OKX Demo Key |
 | [OKX Agent Trade Kit](https://github.com/okx/agent-trade-kit) | 官方 Demo profile、MCP/CLI、约束良好的 API 工具 | 不是模型训练/回测平台，也没有现代交易 UI；工具面包含大量不需要的写操作 | 参考 Demo 行为与安全建议，不整体引入 |
-| [CCXT](https://github.com/ccxt/ccxt) | OKX 适配、统一行情/订单 API、Demo 标头 | 没有策略、AI 或 UI；依赖表面覆盖 100+ 交易所 | 参考其 OKX Demo 适配；潮汐台用更窄的白名单客户端 |
+| [CCXT](https://github.com/ccxt/ccxt) | OKX 适配、统一行情/订单 API、Demo 标头 | 没有策略、AI 或 UI；依赖表面覆盖 100+ 交易所 | 参考其 OKX Demo 适配；墨衡用更窄的白名单客户端 |
 | [Hummingbot](https://github.com/hummingbot/hummingbot) / [Dashboard](https://github.com/hummingbot/dashboard) | 做市与多实例编排、回测/运维 UI | `okx_paper_trade` 是 Hummingbot 内部纸面交易；系统较重，AI 训练不是核心 | 不整体部署 |
 | [NautilusTrader](https://github.com/nautechsystems/nautilus_trader) | 专业事件引擎、OKX Spot Data/Exec、Demo | 无完整 UI，AI 训练不是核心；Rust/Python 栈对首版过重 | 后续高级研究候选 |
 | [Microsoft Qlib](https://github.com/microsoft/qlib) | 因子、监督学习、RL、研究流水线 | 主要是研究平台，不是即装即用的 OKX 自动机器人 | 后续离线研究候选 |
