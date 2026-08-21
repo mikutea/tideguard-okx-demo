@@ -155,7 +155,7 @@ export default function App() {
 
   const content = useMemo(() => {
     if (active === "data") return <DataPage ml={ml} researchMonitor={researchMonitor} refreshing={refreshing} onRefresh={refresh} />;
-    if (active === "training") return <TrainingPage ml={ml} busy={actionBusy} onTrain={() => runAction(() => api.trainAutonomy(), "新训练批次已启动；不会直接晋级或下单")} />;
+    if (active === "training") return <TrainingPage ml={ml} researchMonitor={researchMonitor} busy={actionBusy} onTrain={() => runAction(() => api.trainAutonomy(), "新训练批次已启动；不会直接晋级或下单")} />;
     if (active === "models") return <ModelsPage ml={ml} explanationMode={explanationMode} />;
     if (active === "execution") return <ExecutionPage environment={environmentMode} environmentStatus={environmentStatus} transitionLocked={transitionLocked} status={status} market={market} account={account} orders={orders} ml={ml} busy={actionBusy} onEnableMaster={(phrase) => runAction(() => api.enableAutonomy(phrase), "长期 Demo master 已启用；无 champion 与 lease 仍不会开仓")} onDisableMaster={() => runAction(() => api.disableAutonomy("用户通过墨衡运行中心停止新开仓"), "已停止新开仓；已有模型仓位继续退出管理")} onRefresh={refresh} onNotice={notify} />;
     if (active === "audit") return <AuditSettingsPage status={status} environmentStatus={environmentStatus} environmentMode={environmentMode} events={events} chainValid={chainValid} onRefreshEnvironment={refreshEnvironment} onRefresh={refresh} onNotice={notify} />;

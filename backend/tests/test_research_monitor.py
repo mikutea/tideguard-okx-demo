@@ -248,3 +248,143 @@ def test_monitor_surfaces_v2_cost_and_calibration_diagnostics(tmp_path) -> None:
     assert result["cashBarRate"] == 0.95
     assert result["chosenPolicy"]["minEntrySpacingBars"] == 96
     assert "fresh_sealed_oos_unavailable" in status["blockers"]
+
+
+def _replay_report(cohort_id: str) -> dict[str, object]:
+    body: dict[str, object] = {
+        "completedAt": "2026-08-22T01:00:00.000Z",
+        "dataset": {
+            "cohortId": cohort_id,
+            "firstReplayAt": "2023-01-01T00:00:00.000Z",
+            "lastReplayAt": "2025-04-20T00:00:00.000Z",
+        },
+        "decision": "research_only",
+        "execution": {
+            "executionAllowlistChanged": False,
+            "historicalReplayOnly": True,
+            "orderCapability": False,
+            "privateApi": False,
+            "publicDataOnly": True,
+        },
+        "model": {
+            "calibrationImproved": True,
+            "family": "hist_gradient_boosting",
+        },
+        "episodes": [
+            {
+                "assetRows": 3,
+                "availableAt": "2022-12-31T23:55:00.000Z",
+                "calibrationRows": 25920,
+                "calibrationStartAt": "2022-12-01T00:00:00.000Z",
+                "calibrationStopAt": "2022-12-31T22:50:00.000Z",
+                "diagnostics": {"calibratedBrier": 0.21, "rawBrier": 0.31},
+                "episode": 0,
+                "episodeId": "replay_episode_test",
+                "fitRows": 289000,
+                "fitStartAt": "2022-01-01T00:00:00.000Z",
+                "fitStopAt": "2022-11-30T22:50:00.000Z",
+                "labelCompleteAt": "2022-12-31T23:50:00.000Z",
+                "replayRows": 25920,
+                "replayStartAt": "2023-01-01T00:00:00.000Z",
+                "replayStopAt": "2023-01-30T23:55:00.000Z",
+                "trainingSeconds": 3.5,
+            }
+        ],
+        "promotable": False,
+        "promotionBlockers": [
+            "historical_replay_development_only",
+            "requires_90_day_forward_public_shadow",
+        ],
+        "protocol": {
+            "episodeCount": 28,
+            "retrainEveryDays": 30.0,
+        },
+        "replayId": "hreplay_" + "a" * 24,
+        "result": {
+            "chosenPolicy": {
+                "edgeBufferBps": 24.0,
+                "minEntrySpacingBars": 96,
+                "requiredGrossReturnBps": 48.0,
+            },
+            "developmentGatePassed": False,
+            "ordinary": {
+                "broker": {"roundTripCostBps": 24.0},
+                "cashBarRate": 0.98,
+                "checkpoints": [
+                    {
+                        "at": "2023-01-01T00:00:00.000Z",
+                        "cash": 10_000.0,
+                        "drawdown": 0.0,
+                        "equity": 10_000.0,
+                        "positionInstrument": None,
+                        "positionMarketValue": 0.0,
+                    }
+                ],
+                "maxDrawdown": 0.02,
+                "netReturn": -0.01,
+                "finalCash": 9_900.0,
+                "simulatedDays": 840.0,
+                "totalEstimatedSlippageCost": 12.0,
+                "totalFees": 24.0,
+                "trades": [
+                    {
+                        "instrument": "BTC-USDT",
+                        "netPnl": -10.0,
+                        "tradeId": "replay_trade_test",
+                    }
+                ],
+                "tradesPerDay": 0.04,
+                "turnoverMultiple": 3.2,
+            },
+            "stress48Bps": {"netReturn": -0.02},
+        },
+        "schemaVersion": "moheng.historical-replay-report.v1",
+        "shadowDaysCredited": 0,
+        "timing": {
+            "compressionMultiple": 9_000.0,
+            "totalWallSeconds": 8.0,
+        },
+    }
+    return {**body, "reportSha256": sha256_hex(canonical_json(body))}
+
+
+def test_monitor_surfaces_verified_historical_replay_without_trading_capability(
+    tmp_path,
+) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    cohort_id = "cohort_" + "a" * 24
+    _write_json(
+        root / "replays" / "historical-replay-v3-test.json",
+        _replay_report(cohort_id),
+    )
+
+    status = ResearchMonitor(root).status()
+
+    replay = status["replay"]
+    assert replay["valid"] is True
+    assert replay["decision"] == "research_only"
+    assert replay["shadowDaysCredited"] == 0
+    assert replay["episodeCount"] == 28
+    assert replay["episodes"][0]["fitRows"] == 289000
+    assert replay["episodes"][0]["calibratedBrier"] == 0.21
+    assert replay["ordinaryCostBps"] == 24.0
+    assert replay["cashBarRate"] == 0.98
+    assert replay["finalCash"] == 9_900.0
+    assert replay["tradeCount"] == 1
+    assert replay["checkpoints"][0]["equity"] == 10_000.0
+    assert status["safety"]["orderCapability"] is False
+    assert status["safety"]["privateApi"] is False
+
+
+def test_monitor_rejects_tampered_historical_replay(tmp_path) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    report = _replay_report("cohort_" + "a" * 24)
+    report["shadowDaysCredited"] = 90
+    _write_json(root / "replays" / "historical-replay-v3-test.json", report)
+
+    status = ResearchMonitor(root).status()
+
+    assert status["replay"]["valid"] is False
+    assert "historical_replay_integrity_unverified" in status["blockers"]

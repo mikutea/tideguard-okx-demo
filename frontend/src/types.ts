@@ -331,7 +331,83 @@ export interface ResearchMonitorStatus {
     schemaVersion: string | null;
     valid: boolean;
   };
+  replay: HistoricalReplayStatus | null;
   blockers: string[];
+}
+
+export interface HistoricalReplayStatus {
+  blockers: string[];
+  calibrationImproved: boolean;
+  cashBarRate: number | null;
+  checkpoints: Array<{
+    at: string;
+    cash: number | null;
+    drawdown: number | null;
+    equity: number | null;
+    positionInstrument: string | null;
+    positionMarketValue: number | null;
+  }>;
+  chosenPolicy: null | {
+    edgeBufferBps: number | null;
+    minEntrySpacingBars: number | null;
+    requiredGrossReturnBps: number | null;
+  };
+  cohortId: string | null;
+  completedAt: string | null;
+  compressionMultiple: number | null;
+  decision: string | null;
+  developmentGatePassed: boolean;
+  episodeCount: number;
+  episodes: Array<{
+    assetRows: number;
+    availableAt: string | null;
+    calibratedBrier: number | null;
+    calibrationRows: number;
+    calibrationStartAt: string | null;
+    calibrationStopAt: string | null;
+    episode: number;
+    episodeId: string | null;
+    fitRows: number;
+    fitStartAt: string | null;
+    fitStopAt: string | null;
+    labelCompleteAt: string | null;
+    rawBrier: number | null;
+    replayRows: number;
+    replayStartAt: string | null;
+    replayStopAt: string | null;
+    trainingSeconds: number | null;
+  }>;
+  family: string | null;
+  finalCash: number | null;
+  firstReplayAt: string | null;
+  lastReplayAt: string | null;
+  maxDrawdown: number | null;
+  netReturn: number | null;
+  ordinaryCostBps: number | null;
+  promotable: boolean;
+  replayId: string | null;
+  reportSha256: string | null;
+  retrainEveryDays: number | null;
+  schemaVersion: string | null;
+  shadowDaysCredited: number;
+  simulatedDays: number | null;
+  startingCash: number | null;
+  stressNetReturn: number | null;
+  totalEstimatedSlippageCost: number | null;
+  totalFees: number | null;
+  totalWallSeconds: number | null;
+  tradeCount: number;
+  trades: Array<{
+    enteredAt?: string;
+    episodeId?: string;
+    exitedAt?: string;
+    instrument?: string;
+    netPnl?: number;
+    tradeId?: string;
+  }>;
+  tradesPerDay: number | null;
+  turnoverMultiple: number | null;
+  valid: boolean;
 }
 
 export interface MLModelSummary {

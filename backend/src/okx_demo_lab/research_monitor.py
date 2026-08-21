@@ -260,6 +260,159 @@ def _latest_benchmark(root: Path) -> dict[str, Any] | None:
     return None
 
 
+def _latest_replay(root: Path) -> dict[str, Any] | None:
+    replay_root = root / "replays"
+    if not replay_root.is_dir():
+        return None
+    candidates: list[tuple[int, Path]] = []
+    for path in replay_root.glob("historical-replay-v3-*.json"):
+        try:
+            candidates.append((path.stat().st_mtime_ns, path))
+        except OSError:
+            continue
+    for _, path in sorted(candidates, reverse=True)[:100]:
+        value = _read_json(path)
+        if value is None:
+            continue
+        report_hash = value.get("reportSha256")
+        execution = value.get("execution")
+        execution_value = execution if isinstance(execution, dict) else {}
+        valid = bool(
+            _canonical_hash_matches(value, report_hash, excluded={"reportSha256"})
+            and value.get("schemaVersion")
+            == "moheng.historical-replay-report.v1"
+            and value.get("promotable") is False
+            and value.get("shadowDaysCredited") == 0
+            and value.get("decision") == "research_only"
+            and execution_value.get("historicalReplayOnly") is True
+            and execution_value.get("orderCapability") is False
+            and execution_value.get("privateApi") is False
+            and execution_value.get("publicDataOnly") is True
+            and execution_value.get("executionAllowlistChanged") is False
+        )
+        dataset = value.get("dataset")
+        dataset_value = dataset if isinstance(dataset, dict) else {}
+        protocol = value.get("protocol")
+        protocol_value = protocol if isinstance(protocol, dict) else {}
+        model = value.get("model")
+        model_value = model if isinstance(model, dict) else {}
+        timing = value.get("timing")
+        timing_value = timing if isinstance(timing, dict) else {}
+        result = value.get("result")
+        result_value = result if isinstance(result, dict) else {}
+        ordinary = result_value.get("ordinary")
+        ordinary_value = ordinary if isinstance(ordinary, dict) else {}
+        stress = result_value.get("stress48Bps")
+        stress_value = stress if isinstance(stress, dict) else {}
+        policy = result_value.get("chosenPolicy")
+        policy_value = policy if isinstance(policy, dict) else {}
+        checkpoints_value = ordinary_value.get("checkpoints")
+        checkpoints = (
+            [item for item in checkpoints_value if isinstance(item, dict)][:2_000]
+            if isinstance(checkpoints_value, list)
+            else []
+        )
+        trades_value = ordinary_value.get("trades")
+        trades = (
+            [item for item in trades_value if isinstance(item, dict)][-50:]
+            if isinstance(trades_value, list)
+            else []
+        )
+        blockers_value = value.get("promotionBlockers")
+        blockers = (
+            [item for item in blockers_value if isinstance(item, str)]
+            if isinstance(blockers_value, list)
+            else []
+        )
+        episodes_value = value.get("episodes")
+        episodes = []
+        if isinstance(episodes_value, list):
+            for item in episodes_value[:64]:
+                if not isinstance(item, dict):
+                    continue
+                diagnostics = item.get("diagnostics")
+                diagnostics_value = diagnostics if isinstance(diagnostics, dict) else {}
+                episodes.append(
+                    {
+                        "assetRows": _integer(item.get("assetRows")),
+                        "availableAt": item.get("availableAt"),
+                        "calibrationRows": _integer(item.get("calibrationRows")),
+                        "calibrationStartAt": item.get("calibrationStartAt"),
+                        "calibrationStopAt": item.get("calibrationStopAt"),
+                        "calibratedBrier": diagnostics_value.get("calibratedBrier"),
+                        "episode": _integer(item.get("episode")),
+                        "episodeId": item.get("episodeId"),
+                        "fitRows": _integer(item.get("fitRows")),
+                        "fitStartAt": item.get("fitStartAt"),
+                        "fitStopAt": item.get("fitStopAt"),
+                        "labelCompleteAt": item.get("labelCompleteAt"),
+                        "rawBrier": diagnostics_value.get("rawBrier"),
+                        "replayRows": _integer(item.get("replayRows")),
+                        "replayStartAt": item.get("replayStartAt"),
+                        "replayStopAt": item.get("replayStopAt"),
+                        "trainingSeconds": item.get("trainingSeconds"),
+                    }
+                )
+        return {
+            "blockers": blockers,
+            "calibrationImproved": model_value.get("calibrationImproved") is True,
+            "checkpoints": checkpoints,
+            "chosenPolicy": {
+                "edgeBufferBps": policy_value.get("edgeBufferBps"),
+                "minEntrySpacingBars": policy_value.get("minEntrySpacingBars"),
+                "requiredGrossReturnBps": policy_value.get(
+                    "requiredGrossReturnBps"
+                ),
+            }
+            if policy_value
+            else None,
+            "cohortId": dataset_value.get("cohortId"),
+            "completedAt": value.get("completedAt"),
+            "compressionMultiple": timing_value.get("compressionMultiple"),
+            "decision": value.get("decision"),
+            "developmentGatePassed": result_value.get("developmentGatePassed")
+            is True,
+            "episodeCount": _integer(protocol_value.get("episodeCount")),
+            "episodes": episodes,
+            "family": model_value.get("family"),
+            "finalCash": ordinary_value.get("finalCash"),
+            "firstReplayAt": dataset_value.get("firstReplayAt"),
+            "lastReplayAt": dataset_value.get("lastReplayAt"),
+            "maxDrawdown": ordinary_value.get("maxDrawdown"),
+            "netReturn": ordinary_value.get("netReturn"),
+            "cashBarRate": ordinary_value.get("cashBarRate"),
+            "ordinaryCostBps": (
+                ordinary_value.get("broker", {}).get("roundTripCostBps")
+                if isinstance(ordinary_value.get("broker"), dict)
+                else None
+            ),
+            "promotable": value.get("promotable") is True,
+            "replayId": value.get("replayId"),
+            "retrainEveryDays": protocol_value.get("retrainEveryDays"),
+            "reportSha256": report_hash,
+            "schemaVersion": value.get("schemaVersion"),
+            "shadowDaysCredited": _integer(value.get("shadowDaysCredited")),
+            "simulatedDays": ordinary_value.get("simulatedDays"),
+            "startingCash": (
+                ordinary_value.get("broker", {}).get("startingCash")
+                if isinstance(ordinary_value.get("broker"), dict)
+                else None
+            ),
+            "stressNetReturn": stress_value.get("netReturn"),
+            "totalEstimatedSlippageCost": ordinary_value.get(
+                "totalEstimatedSlippageCost"
+            ),
+            "totalFees": ordinary_value.get("totalFees"),
+            "totalWallSeconds": timing_value.get("totalWallSeconds"),
+            "trades": trades,
+            "tradeCount": len(trades_value) if isinstance(trades_value, list) else 0,
+            "tradesPerDay": ordinary_value.get("tradesPerDay"),
+            "turnoverMultiple": ordinary_value.get("turnoverMultiple"),
+            "valid": valid,
+        }
+    return None
+
+
 class ResearchMonitor:
     """Read project-local public-research telemetry without trading capability."""
 
@@ -286,6 +439,7 @@ class ResearchMonitor:
                 "benchmark": None,
                 "cohort": None,
                 "history": None,
+                "replay": None,
                 "signals": {"available": False},
                 "storageRoot": None,
                 "universe": None,
@@ -363,6 +517,16 @@ class ResearchMonitor:
             blockers.append("multi_asset_oos_gate_failed")
         if benchmark is not None and benchmark["valid"]:
             blockers.extend(benchmark["blockers"])
+        replay = _latest_replay(root)
+        if replay is not None and not replay["valid"]:
+            blockers.append("historical_replay_integrity_unverified")
+        if (
+            replay is not None
+            and replay["valid"]
+            and cohort is not None
+            and replay["cohortId"] != cohort["cohortId"]
+        ):
+            blockers.append("historical_replay_cohort_mismatch")
         blockers.extend(["requires_90_day_forward_public_shadow", "static_cost_only"])
         return {
             **base,
@@ -371,6 +535,7 @@ class ResearchMonitor:
             "blockers": list(dict.fromkeys(blockers)),
             "cohort": cohort,
             "history": history,
+            "replay": replay,
             "signals": {
                 "available": signal_database.is_file(),
                 "databaseBytes": _file_size(signal_database),

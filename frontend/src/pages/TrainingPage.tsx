@@ -1,9 +1,10 @@
 import { Activity, BrainCircuit, Check, Clock3, Cpu, DatabaseZap, Gauge, HardDrive, Play, ShieldCheck } from "lucide-react";
 import { WalkForwardMatrix } from "../components/Charts";
+import { HistoricalReplayConsole } from "../components/HistoricalReplayConsole";
 import { PageHeader, StatusMark } from "../components/Primitives";
 import { formatTime, shortId } from "../lib/format";
 import { deriveResearchStatus } from "../lib/research";
-import type { MLStatus } from "../types";
+import type { MLStatus, ResearchMonitorStatus } from "../types";
 
 const featureGroups = [
   { label: "多尺度收益", count: 5, color: "jade" },
@@ -25,7 +26,7 @@ const stageLabels: Record<(typeof stageOrder)[number], string> = {
   completed: "等待监督审查"
 };
 
-export function TrainingPage({ ml, busy, onTrain }: { ml: MLStatus | null; busy: boolean; onTrain: () => Promise<void> }) {
+export function TrainingPage({ ml, researchMonitor, busy, onTrain }: { ml: MLStatus | null; researchMonitor: ResearchMonitorStatus | null; busy: boolean; onTrain: () => Promise<void> }) {
   const research = deriveResearchStatus(ml);
   const training = research.training;
   const currentStageIndex = training?.stage === "failed" || training?.stage === "idle" ? -1 : stageOrder.indexOf(training?.stage ?? "syncing");
@@ -33,6 +34,8 @@ export function TrainingPage({ ml, busy, onTrain }: { ml: MLStatus | null; busy:
   const models = ml?.longRun.review.models ?? [];
   return <div className="page-stack training-page">
     <PageHeader title="训练任务" description="训练、验证、工件冻结与 Shadow 分阶段运行；模型不能在线修改代码或风险边界。" meta={<StatusMark tone={!ml ? "neutral" : running ? "warning" : ml.longRun.latestTraining?.status === "failed" ? "danger" : "healthy"}>{!ml ? "等待训练遥测" : running ? "训练进行中" : ml.longRun.latestTraining?.status === "failed" ? "最近训练失败" : "调度正常"}</StatusMark>} actions={<button className="button primary" disabled={busy || running || !ml} onClick={() => void onTrain()}><Play size={16} />{busy || running ? "训练中…" : "运行下一批训练"}</button>} />
+
+    <HistoricalReplayConsole replay={researchMonitor?.replay} />
 
     <section className="workspace-panel training-stage-panel" aria-labelledby="training-stage-title">
       <div className="panel-heading"><div><h2 id="training-stage-title">任务阶段与证据产物</h2><p>阶段级进度；没有后端细粒度遥测时不伪造百分比</p></div><span>{ml?.longRun.latestTraining ? `run ${shortId(ml.longRun.latestTraining.runId, 12)}` : "尚无 run"}</span></div>

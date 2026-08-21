@@ -58,3 +58,39 @@ Residual P3 differences are intentional:
 - After the first historical backfill and training run, recapture populated data, training and model pages for release notes. This is not a current fidelity blocker because the software correctly exposes the empty/pre-training state.
 
 final result: passed
+
+## V3 historical replay addendum — 2026-08-22
+
+### Accepted baseline and latest evidence
+
+- Accepted training-page baseline: `.research-data/qa/training-baseline.png`.
+- Latest desktop replay console: `.research-data/qa/training-replay-desktop.png`.
+- Latest mobile replay console: `.research-data/qa/training-replay-mobile.png` at the exact 390 × 844 CSS viewport.
+- The V3 work intentionally keeps the accepted 墨衡 design language instead of introducing a second concept style: ink-black workspace, jade operation state, bronze research markers, blue calibration state, vermilion losses, square technical panels and the existing Microsoft YaHei / mono hierarchy.
+
+### Fidelity ledger
+
+| Comparison point | Baseline | V3 implementation | Result |
+| --- | --- | --- | --- |
+| Navigation and safety hierarchy | Persistent left rail, Demo badge and emergency stop | Unchanged; replay appears inside the existing Training route | Match |
+| Typography | 24–32 px page heading, 13 px dense evidence text, mono identifiers | Same hierarchy; replay ID, English kicker and numeric evidence use mono/tabular treatment | Match |
+| Panel geometry | Tight 8 px radii, 1 px technical borders, dense grid rhythm | Replay title, KPI strip, chart/inspector split and generation rail follow the same geometry | Match |
+| Semantic color | Jade operational, bronze research, blue model evidence, vermilion loss | Replay uses jade playback, bronze cursor, blue calibration and vermilion negative return | Match |
+| Data visualization | Graphs and matrices disclose real state without decorative placeholder values | 841 real daily checkpoints, full muted path, played jade path and current cursor; no synthetic values | Improved |
+| Safety copy | Demo/Live boundary and no-profit guarantee remain visible | Fixed `0 Shadow 天 · 0 下单能力`; even a passed development gate remains non-promotable | Match |
+| Responsive behavior | Single-column mobile cards and fixed six-route bottom navigation | Replay KPI pairs, stacked causal stages, full-width controls and horizontal generation rail | Match |
+
+### Above-the-fold copy diff
+
+- Before: the first major panel was “任务阶段与证据产物”, which described the latest training run but did not expose historical model evolution.
+- After: “历史高速回放训练场” appears first, with the explicit contract “365 天滚动拟合，30 天重新训练；播放器只读取已冻结证据，不触发训练、私有 API 或订单。” The original task-stage panel remains immediately below it.
+
+### Interaction and responsive proof
+
+- Play at 8× advanced the readout from `05/03 01:20` to `05/08 01:20`, then exposed a visible Pause control.
+- Selecting generation 28 moved the slider to checkpoint 810 and changed the inspector to “第 28 代”.
+- Desktop and 390 × 844 mobile both reported `scrollWidth === clientWidth`; no horizontal overflow.
+- Replay controls have a minimum visible height of 44 px after the focused QA pass.
+- Browser console warnings/errors: 0 on desktop and mobile.
+
+Final V3 replay UI result: passed with no actionable P0, P1 or P2 finding.

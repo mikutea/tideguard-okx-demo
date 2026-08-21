@@ -19,6 +19,14 @@ from .execution import (
     ManualReviewRequired,
     authorize_demo_session,
 )
+from .historical_replay import (
+    HISTORICAL_REPLAY_SCHEMA_VERSION,
+    HistoricalReplayError,
+    ReplayBrokerConfig,
+    ReplayEpisodeBinding,
+    ReplayPolicy,
+    run_historical_replay,
+)
 from .registry import ModelRegistry, PromotionDenied, PromotionPolicy
 from .long_run import LongRunCoordinator
 from .supervisor import CodexSupervisor
@@ -53,6 +61,8 @@ __all__ = [
     "DemoStrategyPolicy",
     "FrozenLinearModel",
     "FrozenModelBundle",
+    "HISTORICAL_REPLAY_SCHEMA_VERSION",
+    "HistoricalReplayError",
     "ManualReviewRequired",
     "MarketSnapshot",
     "ModelManifest",
@@ -61,6 +71,9 @@ __all__ = [
     "OrderProposal",
     "PromotionDenied",
     "PromotionPolicy",
+    "ReplayBrokerConfig",
+    "ReplayEpisodeBinding",
+    "ReplayPolicy",
     "SupervisorDecision",
     "TrainingConfig",
     "ValidationReport",
@@ -69,4 +82,5 @@ __all__ = [
     "build_order_proposal",
     "plan_walk_forward",
     "run_walk_forward",
+    "run_historical_replay",
 ]

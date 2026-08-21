@@ -99,3 +99,32 @@ SPOT long 仓位，否则持有现金；最短再次入场间隔候选为 48/96 
 回顾性开发折，并将旧 sealed 折标记为 retired，绝不把重复查看的历史伪装成全新
 OOS。任何结果仍固定为 `research_only` 和 `promotable=false`；只有新的 90 天
 前瞻公共 Shadow 才能提供新证据，且不会自动注册 champion、扩大白名单或下单。
+
+## Phase 3: 历史高速回放训练场
+
+V3 把内容寻址的多资产 cohort 变成一个因果历史时钟：每个模型只看当时已经完成
+标签的数据，使用 365 天滚动拟合窗和隔离的 30 天校准窗，随后回放 30 天，再训练
+下一代模型。信号至少延迟一根 5 分钟 K 线成交；虚拟 SPOT 经纪商维护单一现金
+账本，并显式扣除双边手续费、滑点和历史成交量容量约束：
+
+```powershell
+# 单周期冒烟测试
+.\scripts\run-historical-replay.ps1 -MaxEpisodes 1
+
+# 对最新冻结 cohort 运行所有可用的 30 天周期
+.\scripts\run-historical-replay.ps1
+
+# 独立复核哈希、因果时间线、逐笔延迟与现金账本
+& ".\.research-data\runtime\venv\Scripts\python.exe" `
+  .\research\verify_historical_replay.py `
+  .\.research-data\replays\historical-replay-v3-<timestamp>.json
+```
+
+证据写入 `.research-data/replays/historical-replay-v3-*.json`，训练中心会以逐日权益
+曲线、可播放时钟和模型更迭轨展示最新一份通过哈希校验的报告。播放器只重放报告，
+不会重新训练，也不会访问私有 API。
+
+这是回顾性开发工具，不是“刷模拟盘天数”：所有报告固定
+`research_only / promotable=false / shadowDaysCredited=0`，并保留固定幸存者偏差、
+静态 OHLCV 成交模型、缺少历史订单簿和仍需 90 天未来公共 Shadow 等阻断项。
+历史回放能更快淘汰差策略，不能证明未来盈利。
