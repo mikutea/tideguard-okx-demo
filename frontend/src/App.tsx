@@ -11,7 +11,7 @@ import { ExecutionPage } from "./pages/ExecutionPage";
 import { ModelsPage } from "./pages/ModelsPage";
 import { RuntimePage } from "./pages/RuntimePage";
 import { TrainingPage } from "./pages/TrainingPage";
-import type { AccountData, AuditEvent, DemoOrder, EnvironmentMode, EnvironmentStatus, MarketData, MLStatus, SystemStatus } from "./types";
+import type { AccountData, AuditEvent, DemoOrder, EnvironmentMode, EnvironmentStatus, MarketData, MLStatus, ResearchMonitorStatus, SystemStatus } from "./types";
 
 type NoticeTone = "success" | "warning" | "error" | "info";
 interface Notice { tone: NoticeTone; message: string }
@@ -42,6 +42,7 @@ export default function App() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [chainValid, setChainValid] = useState<boolean | null>(null);
   const [ml, setML] = useState<MLStatus | null>(null);
+  const [researchMonitor, setResearchMonitor] = useState<ResearchMonitorStatus | null>(null);
   const [connection, setConnection] = useState<"live" | "stale" | "offline" | "loading">("loading");
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -85,8 +86,8 @@ export default function App() {
         const normalizedProfile = normalizeEnvironment(nextStatus.environmentProfile);
         if (normalizedProfile) setEnvironmentStatus(normalizedProfile);
       }
-      const [marketResult, accountResult, orderResult, auditResult, mlResult, environmentResult] = await Promise.allSettled([
-        api.getMarket(), api.getAccount(), api.getOrders(), api.getAudit(120), api.getMLStatus(), api.getEnvironmentStatus()
+      const [marketResult, accountResult, orderResult, auditResult, mlResult, environmentResult, researchResult] = await Promise.allSettled([
+        api.getMarket(), api.getAccount(), api.getOrders(), api.getAudit(120), api.getMLStatus(), api.getEnvironmentStatus(), api.getResearchStatus()
       ]);
       let partial = false;
       if (marketResult.status === "fulfilled") setMarket(marketResult.value); else partial = true;
@@ -94,6 +95,7 @@ export default function App() {
       if (orderResult.status === "fulfilled") setOrders(orderResult.value); else partial = true;
       if (auditResult.status === "fulfilled") { setEvents(auditResult.value.events); setChainValid(auditResult.value.chainValid); } else partial = true;
       if (mlResult.status === "fulfilled") setML(mlResult.value); else partial = true;
+      if (researchResult.status === "fulfilled") setResearchMonitor(researchResult.value); else partial = true;
       if (environmentResult.status === "fulfilled") {
         const normalized = normalizeEnvironment(environmentResult.value);
         if (normalized) {
@@ -152,13 +154,13 @@ export default function App() {
   };
 
   const content = useMemo(() => {
-    if (active === "data") return <DataPage ml={ml} refreshing={refreshing} onRefresh={refresh} />;
+    if (active === "data") return <DataPage ml={ml} researchMonitor={researchMonitor} refreshing={refreshing} onRefresh={refresh} />;
     if (active === "training") return <TrainingPage ml={ml} busy={actionBusy} onTrain={() => runAction(() => api.trainAutonomy(), "新训练批次已启动；不会直接晋级或下单")} />;
     if (active === "models") return <ModelsPage ml={ml} explanationMode={explanationMode} />;
     if (active === "execution") return <ExecutionPage environment={environmentMode} environmentStatus={environmentStatus} transitionLocked={transitionLocked} status={status} market={market} account={account} orders={orders} ml={ml} busy={actionBusy} onEnableMaster={(phrase) => runAction(() => api.enableAutonomy(phrase), "长期 Demo master 已启用；无 champion 与 lease 仍不会开仓")} onDisableMaster={() => runAction(() => api.disableAutonomy("用户通过墨衡运行中心停止新开仓"), "已停止新开仓；已有模型仓位继续退出管理")} onRefresh={refresh} onNotice={notify} />;
     if (active === "audit") return <AuditSettingsPage status={status} environmentStatus={environmentStatus} environmentMode={environmentMode} events={events} chainValid={chainValid} onRefreshEnvironment={refreshEnvironment} onRefresh={refresh} onNotice={notify} />;
     return <RuntimePage status={status} market={market} account={account} ml={ml} events={events} explanationMode={explanationMode} onNavigate={navigate} />;
-  }, [account, actionBusy, active, chainValid, environmentMode, environmentStatus, events, explanationMode, market, ml, navigate, notify, orders, refresh, refreshEnvironment, refreshing, runAction, status, transitionLocked]);
+  }, [account, actionBusy, active, chainValid, environmentMode, environmentStatus, events, explanationMode, market, ml, navigate, notify, orders, refresh, refreshEnvironment, refreshing, researchMonitor, runAction, status, transitionLocked]);
 
   return <>
     <Shell active={active} onNavigate={navigate} explanationMode={explanationMode} onExplanationMode={setExplanationMode} environment={environmentMode} transitionLocked={transitionLocked} status={status} connection={connection} lastUpdated={lastUpdated} onEmergency={() => setKillDialog(true)}>{content}</Shell>

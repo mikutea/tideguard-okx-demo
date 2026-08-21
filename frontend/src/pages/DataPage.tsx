@@ -1,11 +1,12 @@
 import { AlertTriangle, Archive, CheckCircle2, Database, FileKey, RefreshCw, Rows3, ShieldCheck } from "lucide-react";
 import { CoverageTimeline, DataLineage } from "../components/Charts";
 import { PageHeader, StatusMark } from "../components/Primitives";
+import { ResearchObservatory } from "../components/ResearchObservatory";
 import { formatTime, shortId } from "../lib/format";
 import { deriveResearchStatus } from "../lib/research";
-import type { MLStatus } from "../types";
+import type { MLStatus, ResearchMonitorStatus } from "../types";
 
-export function DataPage({ ml, refreshing, onRefresh }: { ml: MLStatus | null; refreshing: boolean; onRefresh: () => Promise<void> }) {
+export function DataPage({ ml, researchMonitor, refreshing, onRefresh }: { ml: MLStatus | null; researchMonitor: ResearchMonitorStatus | null; refreshing: boolean; onRefresh: () => Promise<void> }) {
   const research = deriveResearchStatus(ml);
   const dataset = research.dataset;
   const hasConfirmedHistory = Boolean(
@@ -24,6 +25,7 @@ export function DataPage({ ml, refreshing, onRefresh }: { ml: MLStatus | null; r
   const reportedFolds = Math.max(0, ...((ml?.longRun.review.models ?? []).map((model) => model.metrics?.folds ?? 0)));
   return <div className="page-stack data-page">
     <PageHeader title="数据中心" description="扩展历史覆盖，但先保证连续、完成、去重和时间隔离；更多数据不等于更高收益。" meta={<StatusMark tone={!dataset ? "neutral" : dataset.syncState === "failed" ? "danger" : dataset.syncState === "running" ? "warning" : hasConfirmedHistory ? "healthy" : "neutral"}>{!dataset ? "等待仓库遥测" : dataset.syncState === "running" ? "回填中" : dataset.syncState === "failed" ? "回填失败" : hasConfirmedHistory ? "公共数据已确认" : "等待首次全量回填"}</StatusMark>} actions={<button className="button secondary" disabled={refreshing} onClick={() => void onRefresh()}><RefreshCw className={refreshing ? "spin" : ""} size={16} />刷新证据</button>} />
+    <ResearchObservatory status={researchMonitor} />
     <CoverageTimeline research={research} />
     <div className="data-grid">
       <DataLineage research={research} />

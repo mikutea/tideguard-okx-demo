@@ -50,6 +50,7 @@ from .models import (
     ResetKillRequest,
 )
 from .okx_client import OkxClient, OkxClientError
+from .research_monitor import ResearchMonitor
 from .secrets import credentials_configured
 from .service import (
     EnvironmentSwitchService,
@@ -260,6 +261,7 @@ async def lifespan(app: FastAPI):
     app.state.ml = ml
     app.state.autonomy = autonomy
     app.state.long_run = long_run
+    app.state.research_monitor = ResearchMonitor()
 
     async def stop_legacy_automation(reason: str) -> dict[str, Any]:
         return await ml.stop_automation(
@@ -590,6 +592,11 @@ async def ml_status(request: Request) -> dict[str, Any]:
         }
     except (RegistryError, AutomationDenied, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/research/status")
+async def research_status(request: Request) -> dict[str, Any]:
+    return request.app.state.research_monitor.status()
 
 
 @app.post("/api/v1/ml/train")

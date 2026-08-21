@@ -13,6 +13,9 @@ def isolate_user_credentials_and_environment(
     """Tests must never discover the developer's real selector or Credential Manager."""
 
     monkeypatch.setenv("TIDEGUARD_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv(
+        "MOHENG_RESEARCH_DATA_DIR", str(tmp_path / ".research-data")
+    )
 
     import okx_demo_lab.okx_client as client_module
     import okx_demo_lab.secrets as secrets_module

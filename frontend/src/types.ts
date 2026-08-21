@@ -238,6 +238,69 @@ export interface ResearchStatus {
   walkForward?: Record<string, FoldMetric[]>;
 }
 
+export interface ResearchMonitorStatus {
+  schemaVersion: string;
+  available: boolean;
+  generatedAt: string;
+  storageRoot: string | null;
+  safety: {
+    executionAllowlist: string[];
+    orderCapability: boolean;
+    privateApi: boolean;
+    publicDataOnly: boolean;
+  };
+  universe: null | {
+    createdAt: string | null;
+    members: string[];
+    policySha256: string | null;
+    reportSha256: string | null;
+    snapshotSha256: string | null;
+    valid: boolean;
+  };
+  history: null | {
+    active: boolean;
+    databaseBytes: number;
+    instruments: Array<{
+      backfillComplete: boolean;
+      coverageDays: number;
+      firstOpenTsMs: number | null;
+      instrument: string;
+      lastOpenTsMs: number | null;
+      listedAt: string | null;
+      missingBars: number;
+      pagesConsumed: number;
+      rowsInsertedThisRun: number;
+      stage: string;
+      storedRowsAtCheckpoint: number;
+      unresolvedConflicts: number;
+    }>;
+    pageBudget: number;
+    pagesConsumed: number;
+    runId: string | null;
+    startedAt: string | null;
+    state: string;
+    universeMatch: boolean;
+    updatedAt: string | null;
+  };
+  signals: {
+    available: boolean;
+    databaseBytes?: number;
+    fullTextStored?: boolean;
+    orderCapability?: boolean;
+    source?: string;
+  };
+  cohort: null | {
+    blockers: string[];
+    cohortId: string | null;
+    contentSha256: string | null;
+    createdAt: string | null;
+    instruments: string[];
+    promotable: boolean;
+    rowCount: number;
+  };
+  blockers: string[];
+}
+
 export interface MLModelSummary {
   modelId: string;
   artifactSha256: string;

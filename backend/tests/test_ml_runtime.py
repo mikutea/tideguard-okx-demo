@@ -119,6 +119,11 @@ def test_ml_status_route_and_training_bounds(tmp_path, monkeypatch) -> None:
         assert response.status_code == 200
         assert response.json()["automation"]["demoOnly"] is True
         assert response.json()["longRun"]["state"]["desiredMode"] == "disabled"
+        research = client.get("/api/v1/research/status")
+        assert research.status_code == 200
+        assert research.json()["available"] is False
+        assert research.json()["safety"]["executionAllowlist"] == ["BTC-USDT"]
+        assert research.json()["safety"]["privateApi"] is False
         autonomy = client.get("/api/v1/autonomy/status")
         assert autonomy.status_code == 200
         assert autonomy.json()["activePosition"] is None

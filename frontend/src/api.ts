@@ -11,6 +11,7 @@ import type {
   MarketData,
   LongRunStatus,
   MLStatus,
+  ResearchMonitorStatus,
   PreviewResult,
   SystemStatus
 } from "./types";
@@ -89,6 +90,7 @@ export const api = {
       }
     ),
   getMLStatus: () => request<MLStatus>("/api/v1/ml/status"),
+  getResearchStatus: () => request<ResearchMonitorStatus>("/api/v1/research/status"),
   trainModel: (candleLimit = 2000) =>
     request<Record<string, unknown>>("/api/v1/ml/train", {
       method: "POST",
