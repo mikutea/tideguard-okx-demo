@@ -30,6 +30,7 @@ from okx_demo_lab.ml.pipeline import (
     BAR_MILLISECONDS,
     build_observations,
     parse_completed_candles,
+    prepare_training_arrays,
     prepare_training_dataset,
     train_and_register_candidate,
 )
@@ -243,6 +244,12 @@ def test_numpy_prepared_dataset_matches_reference_feature_and_label_semantics():
         take_profit_fraction=0.025,
     )
     prepared = prepare_training_dataset(raw, now=NOW, training_config=config)
+    array_prepared = prepare_training_arrays(
+        np.asarray([int(row[0]) for row in raw], dtype=np.int64),
+        np.asarray([[float(value) for value in row[1:6]] for row in raw]),
+        now=NOW,
+        training_config=config,
+    )
     matrix = prepared.observations
     np.testing.assert_allclose(
         matrix.features,
@@ -257,6 +264,14 @@ def test_numpy_prepared_dataset_matches_reference_feature_and_label_semantics():
         atol=1e-12,
     )
     assert matrix.labels.tolist() == [row.label for row in reference]
+    np.testing.assert_array_equal(
+        array_prepared.observations.observed_at_ms, matrix.observed_at_ms
+    )
+    np.testing.assert_allclose(array_prepared.observations.features, matrix.features)
+    np.testing.assert_array_equal(array_prepared.observations.labels, matrix.labels)
+    np.testing.assert_allclose(
+        array_prepared.observations.forward_returns, matrix.forward_returns
+    )
 
 
 def test_100k_history_matrix_has_bounded_build_time_and_memory():

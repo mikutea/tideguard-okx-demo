@@ -70,6 +70,14 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -154,6 +162,15 @@ class CohortBuildResult:
         }
 
 
+@dataclass(frozen=True)
+class ValidatedCohort:
+    manifest_path: Path
+    manifest: Mapping[str, Any]
+    timestamps: np.ndarray
+    candles: np.ndarray
+    correlation: np.ndarray
+
+
 def _latest_snapshot(store: MultiAssetMarketStore, instrument: str) -> MultiAssetMarketSnapshot:
     status = store.status(instrument)
     if not status["readyForSnapshot"]:
@@ -183,6 +200,231 @@ def _array_spec(path: Path, value: np.ndarray) -> dict[str, Any]:
     }
 
 
+def _validated_array(
+    root: Path,
+    arrays: Mapping[str, Any],
+    name: str,
+    *,
+    dtype: str,
+    shape: tuple[int, ...],
+) -> np.ndarray:
+    spec = arrays.get(name)
+    if not isinstance(spec, Mapping):
+        raise MultiAssetCohortError(f"{name} array spec is invalid")
+    file_name = spec.get("file")
+    if (
+        not isinstance(file_name, str)
+        or Path(file_name).name != file_name
+        or Path(file_name).suffix != ".npy"
+    ):
+        raise MultiAssetCohortError(f"{name} array path is invalid")
+    path = root / file_name
+    if not path.is_file() or _hash_file(path) != spec.get("sha256"):
+        raise MultiAssetCohortError(f"{name} array hash mismatch")
+    try:
+        value = np.load(path, allow_pickle=False, mmap_mode="r")
+    except (OSError, ValueError) as exc:
+        raise MultiAssetCohortError(f"{name} array is unreadable") from exc
+    if (
+        str(value.dtype) != dtype
+        or tuple(value.shape) != shape
+        or spec.get("dtype") != dtype
+        or spec.get("shape") != list(shape)
+    ):
+        raise MultiAssetCohortError(f"{name} array contract mismatch")
+    return value
+
+
+def load_validated_cohort(manifest_path: Path) -> ValidatedCohort:
+    """Revalidate a persisted cohort before any model can consume it."""
+
+    try:
+        manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise MultiAssetCohortError("cohort manifest is unreadable") from exc
+    if not isinstance(manifest_value, dict):
+        raise MultiAssetCohortError("cohort manifest is invalid")
+    manifest = dict(manifest_value)
+    content_sha256 = manifest.get("contentSha256")
+    cohort_id = manifest.get("cohortId")
+    if (
+        not _is_sha256(content_sha256)
+        or cohort_id != f"cohort_{content_sha256[:24]}"
+    ):
+        raise MultiAssetCohortError("cohort identity is invalid")
+    if manifest_path.name != "manifest.json" or manifest_path.parent.name != cohort_id:
+        raise MultiAssetCohortError("cohort directory identity is invalid")
+    content = dict(manifest)
+    for key in ("cohortId", "contentSha256", "createdAt", "promotable"):
+        content.pop(key, None)
+    try:
+        content_hash_matches = (
+            sha256_hex(canonical_json(content)) == content_sha256
+        )
+    except (TypeError, ValueError) as exc:
+        raise MultiAssetCohortError("cohort manifest is not canonical JSON") from exc
+    if not content_hash_matches:
+        raise MultiAssetCohortError("cohort manifest hash mismatch")
+    if manifest.get("promotable") is not False:
+        raise MultiAssetCohortError("survivor cohort cannot be promotable")
+    if manifest.get("schemaVersion") != COHORT_SCHEMA_VERSION:
+        raise MultiAssetCohortError("cohort schema version is unsupported")
+    try:
+        created_at = datetime.fromisoformat(
+            str(manifest.get("createdAt", "")).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise MultiAssetCohortError("cohort creation timestamp is invalid") from exc
+    if created_at.tzinfo is None or created_at.utcoffset() is None:
+        raise MultiAssetCohortError("cohort creation timestamp is invalid")
+    if (
+        manifest.get("matrixContract") != RAW_CANDLE_FEATURE_CONTRACT
+        or manifest.get("matrixContractSha256")
+        != RAW_CANDLE_FEATURE_CONTRACT_SHA256
+    ):
+        raise MultiAssetCohortError("cohort matrix contract mismatch")
+    blockers = manifest.get("promotionBlockers")
+    required_blockers = {
+        "fixed_current_survivor_cohort",
+        "requires_90_day_forward_public_shadow",
+        "static_cost_only",
+    }
+    if (
+        not isinstance(blockers, list)
+        or any(not isinstance(item, str) for item in blockers)
+        or not required_blockers.issubset(set(blockers))
+    ):
+        raise MultiAssetCohortError("cohort promotion blockers are incomplete")
+    if (
+        manifest.get("pointInTimeUniverse") is not False
+        or manifest.get("survivorshipMode") != "fixed-current-survivor-cohort"
+        or manifest.get("costEvidence")
+        != {
+            "baseRoundTripBps": 24,
+            "mode": "static-conservative-no-historical-spread",
+            "stressRoundTripBps": 48,
+        }
+    ):
+        raise MultiAssetCohortError("cohort research limitations are invalid")
+
+    instruments = manifest.get("instruments")
+    row_count = manifest.get("rowCount")
+    first_open = manifest.get("firstOpenTsMs")
+    last_open = manifest.get("lastOpenTsMs")
+    if (
+        not isinstance(instruments, list)
+        or not 3 <= len(instruments) <= 8
+        or any(
+            not isinstance(item, str) or not item.endswith("-USDT")
+            for item in instruments
+        )
+        or len(instruments) != len(set(instruments))
+    ):
+        raise MultiAssetCohortError("cohort instruments are invalid")
+    if (
+        isinstance(row_count, bool)
+        or not isinstance(row_count, int)
+        or row_count < 3
+        or isinstance(first_open, bool)
+        or not isinstance(first_open, int)
+        or isinstance(last_open, bool)
+        or not isinstance(last_open, int)
+        or last_open - first_open != (row_count - 1) * FIVE_MINUTES_MS
+    ):
+        raise MultiAssetCohortError("cohort time range is invalid")
+    snapshots = manifest.get("marketSnapshots")
+    if not isinstance(snapshots, list) or len(snapshots) != len(instruments):
+        raise MultiAssetCohortError("cohort market snapshot evidence is invalid")
+    for instrument, snapshot in zip(instruments, snapshots, strict=True):
+        if (
+            not isinstance(snapshot, Mapping)
+            or snapshot.get("instrument") != instrument
+            or not isinstance(snapshot.get("rowCount"), int)
+            or snapshot.get("rowCount", 0) < row_count
+            or not isinstance(snapshot.get("snapshotId"), str)
+            or not str(snapshot.get("snapshotId")).startswith("maset_")
+            or not _is_sha256(snapshot.get("contentSha256"))
+        ):
+            raise MultiAssetCohortError("cohort market snapshot evidence is invalid")
+    universe_sha256 = manifest.get("universeSha256")
+    signal_sha256 = manifest.get("signalSnapshotSha256")
+    if (
+        not _is_sha256(universe_sha256)
+        or (
+            signal_sha256 is not None
+            and not _is_sha256(signal_sha256)
+        )
+    ):
+        raise MultiAssetCohortError("cohort source hashes are invalid")
+
+    arrays = manifest.get("arrays")
+    if not isinstance(arrays, Mapping) or set(arrays) != {
+        "timestamps",
+        "candles",
+        "correlation",
+    }:
+        raise MultiAssetCohortError("cohort array manifest is invalid")
+    root = manifest_path.parent
+    timestamps = _validated_array(
+        root, arrays, "timestamps", dtype="int64", shape=(row_count,)
+    )
+    candles = _validated_array(
+        root,
+        arrays,
+        "candles",
+        dtype="float64",
+        shape=(row_count, len(instruments), 7),
+    )
+    correlation = _validated_array(
+        root,
+        arrays,
+        "correlation",
+        dtype="float64",
+        shape=(len(instruments), len(instruments)),
+    )
+    if (
+        int(timestamps[0]) != first_open
+        or int(timestamps[-1]) != last_open
+        or not np.all(np.diff(timestamps) == FIVE_MINUTES_MS)
+    ):
+        raise MultiAssetCohortError("cohort timestamps are not a strict 5m grid")
+    if not np.all(np.isfinite(candles)):
+        raise MultiAssetCohortError("cohort candles contain non-finite values")
+    opens = candles[:, :, 0]
+    highs = candles[:, :, 1]
+    lows = candles[:, :, 2]
+    closes = candles[:, :, 3]
+    volumes = candles[:, :, 4:7]
+    if (
+        np.any(opens <= 0)
+        or np.any(highs <= 0)
+        or np.any(lows <= 0)
+        or np.any(closes <= 0)
+        or np.any(highs < np.maximum(np.maximum(opens, closes), lows))
+        or np.any(lows > np.minimum(np.minimum(opens, closes), highs))
+        or np.any(volumes < 0)
+    ):
+        raise MultiAssetCohortError("cohort candle domain rules failed")
+    returns = np.diff(np.log(closes), axis=0)
+    recomputed = np.corrcoef(returns, rowvar=False)
+    if (
+        not np.all(np.isfinite(correlation))
+        or np.any(correlation < -1.000000000001)
+        or np.any(correlation > 1.000000000001)
+        or not np.allclose(correlation, correlation.T, rtol=1e-12, atol=1e-12)
+        or not np.allclose(np.diag(correlation), 1.0, rtol=1e-12, atol=1e-12)
+        or not np.allclose(correlation, recomputed, rtol=1e-10, atol=1e-12)
+    ):
+        raise MultiAssetCohortError("cohort correlation evidence is invalid")
+    return ValidatedCohort(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        timestamps=timestamps,
+        candles=candles,
+        correlation=correlation,
+    )
+
+
 def _verify_existing_cohort(
     destination: Path,
     *,
@@ -191,12 +433,7 @@ def _verify_existing_cohort(
     content_sha256: str,
 ) -> Path:
     manifest_path = destination / "manifest.json"
-    try:
-        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise MultiAssetCohortError("existing cohort manifest is unreadable") from exc
-    if not isinstance(existing, dict):
-        raise MultiAssetCohortError("existing cohort manifest is invalid")
+    existing = dict(load_validated_cohort(manifest_path).manifest)
     existing_content = dict(existing)
     for key in ("cohortId", "contentSha256", "createdAt", "promotable"):
         existing_content.pop(key, None)
@@ -208,29 +445,6 @@ def _verify_existing_cohort(
         or sha256_hex(canonical_json(existing_content)) != content_sha256
     ):
         raise MultiAssetCohortError("existing cohort manifest hash mismatch")
-    arrays = existing.get("arrays")
-    if not isinstance(arrays, Mapping):
-        raise MultiAssetCohortError("existing cohort array manifest is invalid")
-    for name in ("timestamps", "candles", "correlation"):
-        spec = arrays.get(name)
-        if not isinstance(spec, Mapping):
-            raise MultiAssetCohortError(f"existing {name} array spec is invalid")
-        file_name = spec.get("file")
-        if (
-            not isinstance(file_name, str)
-            or Path(file_name).name != file_name
-            or Path(file_name).suffix != ".npy"
-        ):
-            raise MultiAssetCohortError(f"existing {name} array path is invalid")
-        path = destination / file_name
-        if not path.is_file() or _hash_file(path) != spec.get("sha256"):
-            raise MultiAssetCohortError(f"existing {name} array hash mismatch")
-        try:
-            value = np.load(path, allow_pickle=False, mmap_mode="r")
-        except (OSError, ValueError) as exc:
-            raise MultiAssetCohortError(f"existing {name} array is unreadable") from exc
-        if str(value.dtype) != spec.get("dtype") or list(value.shape) != spec.get("shape"):
-            raise MultiAssetCohortError(f"existing {name} array contract mismatch")
     return manifest_path
 
 
@@ -383,6 +597,7 @@ def build_aligned_cohort(
         else:
             os.replace(temporary, destination)
             manifest_path = destination / "manifest.json"
+        load_validated_cohort(manifest_path)
         return CohortBuildResult(
             cohort_id=cohort_id,
             manifest_path=manifest_path,
@@ -404,6 +619,8 @@ __all__ = [
     "RAW_CANDLE_FEATURE_CONTRACT_SHA256",
     "CohortBuildResult",
     "MultiAssetCohortError",
+    "ValidatedCohort",
     "build_aligned_cohort",
+    "load_validated_cohort",
     "load_frozen_universe",
 ]

@@ -297,62 +297,60 @@ def _window_ema(close: np.ndarray, indices: np.ndarray, periods: int) -> np.ndar
     return convolved[indices - periods + 1]
 
 
-def prepare_training_dataset(
-    raw_candles: Sequence[Sequence[Any]],
+def prepare_training_arrays(
+    timestamps: Sequence[int] | np.ndarray,
+    candles: Sequence[Sequence[float]] | np.ndarray,
     *,
     now: datetime,
     training_config: TrainingConfig,
 ) -> PreparedTrainingDataset:
-    """Build one compact feature/label matrix shared by every candidate config."""
+    """Build the frozen features and labels from validated confirmed OHLCV arrays."""
 
     if now.tzinfo is None or now.utcoffset() is None:
         raise DatasetError("now must be timezone-aware")
-    candle_count = len(raw_candles)
+    try:
+        timestamp_values = np.asarray(timestamps)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise DatasetError("candle timestamps are invalid") from exc
+    if timestamp_values.ndim != 1 or timestamp_values.dtype.kind not in "iu":
+        raise DatasetError("candle timestamps must be a one-dimensional integer array")
+    try:
+        timestamp_values = np.asarray(timestamp_values, dtype=np.int64)
+        candle_values = np.asarray(candles, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise DatasetError("candle arrays are invalid") from exc
+    candle_count = int(timestamp_values.size)
+    if candle_values.shape != (candle_count, 5):
+        raise DatasetError("candle array must contain open, high, low, close, and volume")
     if candle_count <= WARMUP_BARS + DEFAULT_LABEL_HORIZON:
         raise DatasetError("dataset is too short after warmup and label horizon")
-    timestamps = np.empty(candle_count, dtype=np.int64)
-    highs = np.empty(candle_count, dtype=np.float64)
-    lows = np.empty(candle_count, dtype=np.float64)
-    closes = np.empty(candle_count, dtype=np.float64)
-    volumes = np.empty(candle_count, dtype=np.float64)
-    previous_ms: int | None = None
-    now_ms = round(now.astimezone(timezone.utc).timestamp() * 1_000)
-    seen = 0
-    for index, row in enumerate(raw_candles):
-        if index >= candle_count:
-            raise DatasetError("candle source yielded more rows than declared")
-        if not isinstance(row, (list, tuple)) or len(row) != 9:
-            raise DatasetError(f"candle {index} does not match the OKX 9-field schema")
-        timestamp_text = str(row[0]).strip()
-        if not timestamp_text.isdigit():
-            raise DatasetError(f"candle {index} has an invalid timestamp")
-        timestamp_ms = int(timestamp_text)
-        if timestamp_ms <= 0:
-            raise DatasetError(f"candle {index} has an invalid timestamp")
-        if previous_ms is not None and timestamp_ms - previous_ms != BAR_MILLISECONDS:
-            raise DatasetError("candles must be unique, chronological, and exactly 5 minutes apart")
-        previous_ms = timestamp_ms
-        if str(row[8]).strip() != "1":
-            raise DatasetError("training and inference require exchange-confirmed candles")
-        if timestamp_ms + BAR_MILLISECONDS > now_ms + 2_000:
-            raise DatasetError("candle close is in the future")
-        open_price = _finite_decimal(row[1], f"candle {index} open")
-        high = _finite_decimal(row[2], f"candle {index} high")
-        low = _finite_decimal(row[3], f"candle {index} low")
-        close = _finite_decimal(row[4], f"candle {index} close")
-        volume = _finite_decimal(
-            row[5], f"candle {index} volume", allow_zero=True
+    if (
+        np.any(timestamp_values <= 0)
+        or not np.all(np.diff(timestamp_values) == BAR_MILLISECONDS)
+    ):
+        raise DatasetError(
+            "candles must be unique, chronological, and exactly 5 minutes apart"
         )
-        if high < max(open_price, close, low) or low > min(open_price, close, high):
-            raise DatasetError(f"candle {index} OHLC values are inconsistent")
-        timestamps[index] = timestamp_ms
-        highs[index] = high
-        lows[index] = low
-        closes[index] = close
-        volumes[index] = volume
-        seen += 1
-    if seen != candle_count:
-        raise DatasetError("candle source yielded fewer rows than declared")
+    now_ms = round(now.astimezone(timezone.utc).timestamp() * 1_000)
+    if int(timestamp_values[-1]) + BAR_MILLISECONDS > now_ms + 2_000:
+        raise DatasetError("candle close is in the future")
+    if not np.all(np.isfinite(candle_values)):
+        raise DatasetError("candle array contains non-finite values")
+    opens = candle_values[:, 0]
+    highs = candle_values[:, 1]
+    lows = candle_values[:, 2]
+    closes = candle_values[:, 3]
+    volumes = candle_values[:, 4]
+    if (
+        np.any(opens <= 0)
+        or np.any(highs <= 0)
+        or np.any(lows <= 0)
+        or np.any(closes <= 0)
+        or np.any(volumes < 0)
+        or np.any(highs < np.maximum(np.maximum(opens, closes), lows))
+        or np.any(lows > np.minimum(np.minimum(opens, closes), highs))
+    ):
+        raise DatasetError("candle array violates OHLCV domain rules")
 
     indices = np.arange(
         WARMUP_BARS,
@@ -392,7 +390,7 @@ def prepare_training_dataset(
     )
     ema_12 = _window_ema(closes, indices, 12)
     ema_48 = _window_ema(closes, indices, 48)
-    closed_ms = timestamps[indices] + BAR_MILLISECONDS
+    closed_ms = timestamp_values[indices] + BAR_MILLISECONDS
     hour = (closed_ms % 86_400_000) / 3_600_000.0
     weekday = ((closed_ms // 86_400_000) + 3) % 7
 
@@ -445,6 +443,72 @@ def prepare_training_dataset(
         observations=matrix,
         candle_rows=candle_count,
         label_contract_sha256=_label_contract_sha256(training_config),
+    )
+
+
+def prepare_training_dataset(
+    raw_candles: Sequence[Sequence[Any]],
+    *,
+    now: datetime,
+    training_config: TrainingConfig,
+) -> PreparedTrainingDataset:
+    """Build one compact feature/label matrix shared by every candidate config."""
+
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise DatasetError("now must be timezone-aware")
+    candle_count = len(raw_candles)
+    if candle_count <= WARMUP_BARS + DEFAULT_LABEL_HORIZON:
+        raise DatasetError("dataset is too short after warmup and label horizon")
+    timestamps = np.empty(candle_count, dtype=np.int64)
+    opens = np.empty(candle_count, dtype=np.float64)
+    highs = np.empty(candle_count, dtype=np.float64)
+    lows = np.empty(candle_count, dtype=np.float64)
+    closes = np.empty(candle_count, dtype=np.float64)
+    volumes = np.empty(candle_count, dtype=np.float64)
+    previous_ms: int | None = None
+    now_ms = round(now.astimezone(timezone.utc).timestamp() * 1_000)
+    seen = 0
+    for index, row in enumerate(raw_candles):
+        if index >= candle_count:
+            raise DatasetError("candle source yielded more rows than declared")
+        if not isinstance(row, (list, tuple)) or len(row) != 9:
+            raise DatasetError(f"candle {index} does not match the OKX 9-field schema")
+        timestamp_text = str(row[0]).strip()
+        if not timestamp_text.isdigit():
+            raise DatasetError(f"candle {index} has an invalid timestamp")
+        timestamp_ms = int(timestamp_text)
+        if timestamp_ms <= 0:
+            raise DatasetError(f"candle {index} has an invalid timestamp")
+        if previous_ms is not None and timestamp_ms - previous_ms != BAR_MILLISECONDS:
+            raise DatasetError("candles must be unique, chronological, and exactly 5 minutes apart")
+        previous_ms = timestamp_ms
+        if str(row[8]).strip() != "1":
+            raise DatasetError("training and inference require exchange-confirmed candles")
+        if timestamp_ms + BAR_MILLISECONDS > now_ms + 2_000:
+            raise DatasetError("candle close is in the future")
+        open_price = _finite_decimal(row[1], f"candle {index} open")
+        high = _finite_decimal(row[2], f"candle {index} high")
+        low = _finite_decimal(row[3], f"candle {index} low")
+        close = _finite_decimal(row[4], f"candle {index} close")
+        volume = _finite_decimal(
+            row[5], f"candle {index} volume", allow_zero=True
+        )
+        if high < max(open_price, close, low) or low > min(open_price, close, high):
+            raise DatasetError(f"candle {index} OHLC values are inconsistent")
+        timestamps[index] = timestamp_ms
+        opens[index] = open_price
+        highs[index] = high
+        lows[index] = low
+        closes[index] = close
+        volumes[index] = volume
+        seen += 1
+    if seen != candle_count:
+        raise DatasetError("candle source yielded fewer rows than declared")
+    return prepare_training_arrays(
+        timestamps,
+        np.column_stack((opens, highs, lows, closes, volumes)),
+        now=now,
+        training_config=training_config,
     )
 
 

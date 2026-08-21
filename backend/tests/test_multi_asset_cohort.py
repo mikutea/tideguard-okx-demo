@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ from okx_demo_lab.ml.multi_asset_cohort import (
     RAW_CANDLE_FEATURE_CONTRACT_SHA256,
     MultiAssetCohortError,
     build_aligned_cohort,
+    load_validated_cohort,
 )
 from okx_demo_lab.ml.multi_asset_market import (
     FIVE_MINUTES_MS,
@@ -140,6 +142,10 @@ def test_builds_strict_intersection_arrays_and_blocks_promotion(tmp_path: Path) 
     assert "requires_90_day_forward_public_shadow" in manifest["promotionBlockers"]
     assert manifest["signalSnapshotSha256"] is None
     assert result.manifest_path.resolve().is_relative_to(tmp_path.resolve())
+    validated = load_validated_cohort(result.manifest_path)
+    assert validated.timestamps.shape == (5,)
+    assert validated.candles.shape == (5, 3, 7)
+    assert validated.correlation.shape == (3, 3)
 
 
 def test_universe_hash_or_execution_allowlist_tampering_fails_closed(tmp_path: Path) -> None:
@@ -212,10 +218,46 @@ def test_existing_survivor_cohort_cannot_be_relabelled_promotable(tmp_path: Path
     manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
     manifest["promotable"] = True
     first.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(MultiAssetCohortError, match="manifest hash mismatch"):
+    with pytest.raises(MultiAssetCohortError, match="cannot be promotable"):
         build_aligned_cohort(
             store=store,
             universe_path=universe,
             output_root=tmp_path / "cohorts",
             now=NOW + timedelta(seconds=1),
         )
+
+
+def test_loader_rejects_semantically_invalid_rehashed_candle_matrix(
+    tmp_path: Path,
+) -> None:
+    store = MultiAssetMarketStore(tmp_path / "market.sqlite3")
+    members = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+    for index, instrument in enumerate(members):
+        _complete_snapshot(store, instrument, 10, 17, 100.0 + index * 100)
+    result = build_aligned_cohort(
+        store=store,
+        universe_path=_universe(tmp_path / "universe.json", members),
+        output_root=tmp_path / "cohorts",
+        now=NOW,
+    )
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    candles_path = result.manifest_path.parent / "candles.npy"
+    candles = np.load(candles_path, allow_pickle=False)
+    candles[0, 0, 1] = 0.0
+    np.save(candles_path, candles, allow_pickle=False)
+    manifest["arrays"]["candles"]["sha256"] = hashlib.sha256(
+        candles_path.read_bytes()
+    ).hexdigest()
+    content = dict(manifest)
+    for key in ("cohortId", "contentSha256", "createdAt", "promotable"):
+        content.pop(key, None)
+    content_sha256 = sha256_hex(canonical_json(content))
+    manifest["contentSha256"] = content_sha256
+    manifest["cohortId"] = f"cohort_{content_sha256[:24]}"
+    result.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    rewritten_root = result.manifest_path.parent.parent / manifest["cohortId"]
+    result.manifest_path.parent.rename(rewritten_root)
+    rewritten_manifest = rewritten_root / "manifest.json"
+
+    with pytest.raises(MultiAssetCohortError, match="domain rules"):
+        load_validated_cohort(rewritten_manifest)
