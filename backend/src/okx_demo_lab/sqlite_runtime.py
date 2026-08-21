@@ -39,7 +39,12 @@ def configure_sqlite_connection(
     *,
     busy_timeout_ms: int = 10_000,
 ) -> str:
-    """Keep WAL locally, but require rollback journal on network storage."""
+    """Keep WAL locally, but require persistent rollback journal remotely.
+
+    PERSIST keeps SQLite's crash-safe rollback protocol while avoiding a
+    create/delete cycle for every commit.  That directory churn is unreliable
+    on some SMB appliances when sibling databases share a basename.
+    """
 
     if (
         not isinstance(busy_timeout_ms, int)
@@ -48,7 +53,7 @@ def configure_sqlite_connection(
     ):
         raise SQLiteRuntimeError("SQLite busy timeout is invalid")
     connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
-    expected = "delete" if is_remote_storage(path) else "wal"
+    expected = "persist" if is_remote_storage(path) else "wal"
     actual = str(
         connection.execute(f"PRAGMA journal_mode={expected.upper()}").fetchone()[0]
     ).lower()
@@ -56,6 +61,8 @@ def configure_sqlite_connection(
         raise SQLiteRuntimeError(
             f"SQLite refused the required {expected.upper()} journal mode"
         )
+    if expected == "persist":
+        connection.execute("PRAGMA journal_size_limit=8388608")
     connection.execute("PRAGMA synchronous=FULL")
     connection.execute("PRAGMA foreign_keys=ON")
     return actual

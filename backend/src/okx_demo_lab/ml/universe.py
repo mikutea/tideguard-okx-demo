@@ -9,6 +9,7 @@ from .strategy import canonical_json, sha256_hex
 
 
 UNIVERSE_SCHEMA_VERSION = "moheng.research-universe.v1"
+MAX_TICKER_FUTURE_SKEW = timedelta(seconds=5)
 DEFAULT_STABLE_BASES = frozenset(
     {"USDT", "USDC", "USDG", "DAI", "FDUSD", "TUSD", "USDE", "USDS"}
 )
@@ -220,7 +221,11 @@ def select_research_universe(
             continue
         listed_at = datetime.fromtimestamp(int(list_time_text) / 1_000, tz=timezone.utc)
         ticker_at = datetime.fromtimestamp(int(ticker_time_text) / 1_000, tz=timezone.utc)
-        if listed_at > listing_cutoff or ticker_at < stale_cutoff or ticker_at > current + timedelta(seconds=5):
+        if (
+            listed_at > listing_cutoff
+            or ticker_at < stale_cutoff
+            or ticker_at > current + MAX_TICKER_FUTURE_SKEW
+        ):
             continue
         try:
             last = _positive_decimal(ticker.get("last"), "last")
@@ -275,6 +280,7 @@ def select_research_universe(
 
 
 __all__ = [
+    "MAX_TICKER_FUTURE_SKEW",
     "UNIVERSE_SCHEMA_VERSION",
     "UniverseError",
     "UniverseMember",

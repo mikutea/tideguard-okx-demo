@@ -26,7 +26,7 @@ from okx_demo_lab.ml.multi_asset_market import (
     OriginProbe,
 )
 from okx_demo_lab.ml.strategy import canonical_json, sha256_hex
-from okx_demo_lab.ml.universe import UNIVERSE_SCHEMA_VERSION
+from okx_demo_lab.ml.universe import MAX_TICKER_FUTURE_SKEW, UNIVERSE_SCHEMA_VERSION
 from okx_demo_lab.public_market import OkxPublicMarketClient, PublicMarketError
 
 
@@ -199,7 +199,7 @@ def load_frozen_universe(
             raise HistoryCoordinatorError("frozen universe member identity is inconsistent")
         listed_at = _parse_iso(member.get("listedAt"), "member.listedAt")
         ticker_at = _parse_iso(member.get("tickerAt"), "member.tickerAt")
-        if listed_at >= created_at or ticker_at > created_at:
+        if listed_at >= created_at or ticker_at > created_at + MAX_TICKER_FUTURE_SKEW:
             raise HistoryCoordinatorError("frozen universe member timestamps are inconsistent")
         bid = _decimal(member.get("bid"), "member.bid")
         ask = _decimal(member.get("ask"), "member.ask")

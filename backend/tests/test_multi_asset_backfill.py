@@ -73,7 +73,11 @@ def candle(timestamp: int, *, price: str = "100", confirm: str = "1") -> list[st
     ]
 
 
-def _member(instrument: str) -> dict[str, object]:
+def _member(
+    instrument: str,
+    *,
+    ticker_at: str = "2026-08-21T03:00:00.000Z",
+) -> dict[str, object]:
     base = instrument.removesuffix("-USDT")
     return {
         "ask": "101",
@@ -88,7 +92,7 @@ def _member(instrument: str) -> dict[str, object]:
         "quoteVolume24h": "50000000",
         "spreadBps": "2",
         "tickSize": "0.01",
-        "tickerAt": "2026-08-21T03:00:00.000Z",
+        "tickerAt": ticker_at,
     }
 
 
@@ -328,6 +332,55 @@ def test_frozen_universe_rejects_hash_tampering_and_runtime_escape(tmp_path) -> 
     outside.write_text("{}", encoding="utf-8")
     with pytest.raises(HistoryCoordinatorError, match="runtime paths"):
         load_frozen_universe(outside, project_root=root)
+
+
+def test_frozen_universe_accepts_exchange_clock_skew_within_discovery_window(
+    tmp_path,
+) -> None:
+    root = data_dir(tmp_path)
+    path = write_frozen_universe(
+        root / ".research-data" / "universe.json", ("BTC-USDT",)
+    )
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["snapshot"]["members"][0]["tickerAt"] = "2026-08-21T03:00:04.999Z"
+    snapshot = report["snapshot"]
+    snapshot["sha256"] = sha256_hex(
+        canonical_json({key: value for key, value in snapshot.items() if key != "sha256"})
+    )
+    report["reportSha256"] = sha256_hex(
+        canonical_json(
+            {key: value for key, value in report.items() if key != "reportSha256"}
+        )
+    )
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+    frozen = load_frozen_universe(path, project_root=root)
+
+    assert frozen.instruments == ("BTC-USDT",)
+
+
+def test_frozen_universe_rejects_exchange_clock_skew_beyond_discovery_window(
+    tmp_path,
+) -> None:
+    root = data_dir(tmp_path)
+    path = write_frozen_universe(
+        root / ".research-data" / "universe.json", ("BTC-USDT",)
+    )
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["snapshot"]["members"][0]["tickerAt"] = "2026-08-21T03:00:05.001Z"
+    snapshot = report["snapshot"]
+    snapshot["sha256"] = sha256_hex(
+        canonical_json({key: value for key, value in snapshot.items() if key != "sha256"})
+    )
+    report["reportSha256"] = sha256_hex(
+        canonical_json(
+            {key: value for key, value in report.items() if key != "reportSha256"}
+        )
+    )
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(HistoryCoordinatorError, match="timestamps are inconsistent"):
+        load_frozen_universe(path, project_root=root)
 
 
 @pytest.mark.asyncio
