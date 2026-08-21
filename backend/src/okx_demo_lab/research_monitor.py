@@ -176,42 +176,85 @@ def _latest_benchmark(root: Path) -> dict[str, Any] | None:
         if value is None:
             continue
         report_hash = value.get("reportSha256")
+        schema_version = value.get("schemaVersion")
         valid = bool(
             _canonical_hash_matches(
                 value, report_hash, excluded={"reportSha256"}
             )
             and value.get("promotable") is False
+            and schema_version
+            in {
+                "moheng.multi-asset-research.v1",
+                "moheng.multi-asset-research.v2",
+            }
         )
         dataset = value.get("dataset")
         dataset_value = dataset if isinstance(dataset, dict) else {}
+        evaluation = value.get("evaluation")
+        evaluation_value = evaluation if isinstance(evaluation, dict) else {}
         results_value = value.get("results")
         results = results_value if isinstance(results_value, list) else []
         summaries = []
+        benchmark_blockers: list[str] = []
         for item in results[:20]:
             if not isinstance(item, dict):
                 continue
             ordinary = item.get("ordinary")
             ordinary_value = ordinary if isinstance(ordinary, dict) else {}
+            policy = item.get("chosenPolicy")
+            policy_value = policy if isinstance(policy, dict) else {}
+            calibration = item.get("calibration")
+            calibration_value = calibration if isinstance(calibration, dict) else {}
+            item_blockers = item.get("promotionBlockers")
+            if isinstance(item_blockers, list):
+                benchmark_blockers.extend(
+                    blocker for blocker in item_blockers if isinstance(blocker, str)
+                )
             summaries.append(
                 {
+                    "calibrationImproved": calibration_value.get("improved") is True,
+                    "cashBarRate": ordinary_value.get("cashBarRate"),
+                    "chosenPolicy": {
+                        "edgeBufferBps": policy_value.get("edgeBufferBps"),
+                        "minEntrySpacingBars": policy_value.get(
+                            "minEntrySpacingBars"
+                        ),
+                        "requiredGrossReturnBps": policy_value.get(
+                            "requiredGrossReturnBps"
+                        ),
+                    }
+                    if policy_value
+                    else None,
                     "chosenThreshold": item.get("chosenThreshold"),
+                    "developmentGatePassed": item.get("developmentGatePassed") is True,
                     "exploratoryGatePassed": item.get("exploratoryGatePassed") is True,
                     "family": item.get("family"),
+                    "grossReturn": ordinary_value.get("grossReturn"),
                     "maxDrawdown": ordinary_value.get("maxDrawdown"),
+                    "maxInstrumentTradeShare": ordinary_value.get(
+                        "maxInstrumentTradeShare"
+                    ),
                     "netReturn": ordinary_value.get("netReturn"),
                     "trades": _integer(ordinary_value.get("trades")),
+                    "tradesPerDay": ordinary_value.get("tradesPerDay"),
                 }
             )
         return {
             "benchmarkId": value.get("benchmarkId"),
+            "blockers": list(dict.fromkeys(benchmark_blockers)),
             "cohortId": dataset_value.get("cohortId"),
             "completedAt": value.get("completedAt"),
+            "developmentGatePassed": any(
+                item["developmentGatePassed"] for item in summaries
+            ),
+            "evaluationScope": evaluation_value.get("scope"),
             "exploratoryGatePassed": any(
                 item["exploratoryGatePassed"] for item in summaries
             ),
             "promotable": value.get("promotable") is True,
             "reportSha256": report_hash,
             "results": summaries,
+            "schemaVersion": schema_version,
             "valid": valid,
         }
     return None
@@ -318,9 +361,9 @@ class ResearchMonitor:
             blockers.append("benchmark_integrity_unverified")
         elif not benchmark["exploratoryGatePassed"]:
             blockers.append("multi_asset_oos_gate_failed")
-        blockers.extend(
-            ["requires_90_day_forward_public_shadow", "static_cost_only"]
-        )
+        if benchmark is not None and benchmark["valid"]:
+            blockers.extend(benchmark["blockers"])
+        blockers.extend(["requires_90_day_forward_public_shadow", "static_cost_only"])
         return {
             **base,
             "available": True,

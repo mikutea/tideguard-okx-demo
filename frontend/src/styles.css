@@ -287,6 +287,13 @@ a { color: inherit; }
 .evidence-list > div { min-height: 48px; display: grid; grid-template-columns: minmax(110px, .45fr) minmax(0, 1fr); gap: 12px; align-items: center; padding: 8px 16px; border-top: 1px solid var(--line); }
 .evidence-list dt { color: var(--text-muted); }
 .evidence-list dd { min-width: 0; margin: 0; text-align: right; overflow-wrap: anywhere; }
+.v2-policy-flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; padding: 14px 16px; border-top: 1px solid var(--line); background: var(--ink-950); }
+.v2-policy-flow > div { position: relative; min-width: 0; display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--line); background: linear-gradient(145deg, rgba(104, 201, 178, .08), rgba(63, 141, 204, .04)); }
+.v2-policy-flow > div::after { content: "›"; position: absolute; top: 50%; right: -7px; z-index: 2; color: var(--blue); transform: translateY(-50%); }
+.v2-policy-flow > div:last-child::after { display: none; }
+.v2-policy-flow small { color: var(--jade); font-variant-numeric: tabular-nums; }
+.v2-policy-flow strong { color: var(--text-soft); }
+.v2-policy-flow span { color: var(--text-muted); font-size: 12px; line-height: 1.35; }
 .partition-panel { padding-bottom: 16px; }
 .rolling-protocol { display: grid; grid-template-columns: minmax(280px, 1.65fr) minmax(180px, .65fr) minmax(220px, .9fr) minmax(180px, .7fr); min-height: 84px; margin: 20px; border: 1px solid var(--line-strong); overflow-x: auto; }
 .rolling-protocol > span { min-width: 150px; display: flex; flex-direction: column; justify-content: center; gap: 6px; padding: 12px 14px; border-right: 1px solid var(--ink-950); }
@@ -662,6 +669,7 @@ tbody tr:hover { background: rgba(104, 201, 178, .035); }
   .now-why-next { grid-template-columns: 1fr; }
   .now-why-next article + article { border-left: 0; border-top: 1px solid var(--line); }
   .runtime-side-rail, .settings-grid, .training-grid, .execution-grid { grid-template-columns: 1fr; }
+  .v2-policy-flow { grid-template-columns: repeat(2, 1fr); }
   .pipeline-map { grid-template-columns: 1fr; }
   .pipeline-stage, .pipeline-stage + .pipeline-stage, .pipeline-stage:nth-child(4) { margin-left: 0; }
   .pipeline-arrow { right: auto; bottom: -15px; left: 23px; transform: rotate(90deg); }

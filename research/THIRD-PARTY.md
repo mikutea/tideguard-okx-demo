@@ -50,13 +50,18 @@ for trusted order-book research until patched and replay-tested.
    a fixed-current survivor cohort and therefore can never be promoted.
    Every fold trains on its past 365 days and evaluates the next 90 days after
    a 12-bar label purge and 1-bar embargo.
-3. Multi-asset capital is one cash-SPOT long/flat position and selects only the
-   highest score at each non-overlapping entry. A SELL signal never earns
-   synthetic short profit. Ordinary evaluation charges 24 bps per round trip
-   and stress evaluation charges 48 bps.
-4. Thresholds 0.52, 0.56, and 0.60 are declared before the run. The threshold
-   is selected only on development folds; the final four folds remain sealed.
-5. Every family and every failure is reported. A model must pass development,
-   full OOS, sealed OOS, and doubled-cost stress checks before native-adapter
-   review. Passing still authorizes only a data-only artifact and Demo shadow,
-   not autonomous trading or Live execution.
+3. V2 reserves the final 30 days inside each training fold for disjoint Platt
+   probability and monotonic expected-return calibration, with a separate
+   label-horizon purge before calibration. The policy stays in cash unless the
+   calibrated expected gross return strictly clears ordinary round-trip cost
+   plus a predeclared safety buffer.
+4. Safety buffers of 12/24/48 bps and minimum entry spacings of 48/96 five-minute
+   bars are declared before the run. Ordinary evaluation charges 24 bps per
+   round trip and stress evaluation charges 48 bps. Gross return, net return,
+   cash exposure, trades/day and instrument concentration are all reported.
+5. The four V1 sealed folds have already been observed and are permanently
+   retired for V2 tuning. V2 evaluates only the first five retrospective
+   development folds; no historical result can be called fresh sealed OOS.
+   Every report remains non-promotable until at least 90 days of new prospective
+   public Shadow evidence and manual review. It never authorizes autonomous or
+   Live execution.

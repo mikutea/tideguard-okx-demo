@@ -193,3 +193,58 @@ def test_monitor_verifies_latest_cohort_manifest_and_oos_report(tmp_path) -> Non
     assert status["benchmark"]["exploratoryGatePassed"] is True
     assert status["benchmark"]["results"][0]["trades"] == 42
     assert "multi_asset_oos_not_run" not in status["blockers"]
+
+
+def test_monitor_surfaces_v2_cost_and_calibration_diagnostics(tmp_path) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    benchmark_body: dict[str, object] = {
+        "benchmarkId": "mabench_v2_test",
+        "completedAt": "2026-08-22T00:00:00.000Z",
+        "dataset": {"cohortId": "cohort_" + "a" * 24},
+        "evaluation": {"scope": "retrospective-development-only"},
+        "promotable": False,
+        "results": [
+            {
+                "calibration": {"improved": True},
+                "chosenPolicy": {
+                    "edgeBufferBps": 24.0,
+                    "minEntrySpacingBars": 96,
+                    "requiredGrossReturnBps": 48.0,
+                },
+                "developmentGatePassed": False,
+                "exploratoryGatePassed": False,
+                "family": "hist_gradient_boosting",
+                "ordinary": {
+                    "cashBarRate": 0.95,
+                    "grossReturn": 0.02,
+                    "maxDrawdown": 0.01,
+                    "maxInstrumentTradeShare": 0.5,
+                    "netReturn": 0.01,
+                    "trades": 20,
+                    "tradesPerDay": 0.2,
+                },
+                "promotionBlockers": [
+                    "prior_sealed_folds_already_observed",
+                    "fresh_sealed_oos_unavailable",
+                ],
+            }
+        ],
+        "schemaVersion": "moheng.multi-asset-research.v2",
+    }
+    benchmark = {
+        **benchmark_body,
+        "reportSha256": sha256_hex(canonical_json(benchmark_body)),
+    }
+    _write_json(root / "benchmarks" / "multi-asset-v2-test.json", benchmark)
+
+    status = ResearchMonitor(root).status()
+
+    assert status["benchmark"]["valid"] is True
+    assert status["benchmark"]["schemaVersion"].endswith(".v2")
+    assert status["benchmark"]["evaluationScope"] == "retrospective-development-only"
+    result = status["benchmark"]["results"][0]
+    assert result["calibrationImproved"] is True
+    assert result["cashBarRate"] == 0.95
+    assert result["chosenPolicy"]["minEntrySpacingBars"] == 96
+    assert "fresh_sealed_oos_unavailable" in status["blockers"]

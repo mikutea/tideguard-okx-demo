@@ -88,7 +88,14 @@ QuantStats 图表以一个 90 天折为一期，只用于浏览折间稳定性�
 
 多资产 benchmark 只接受经过二次验证的内容寻址 cohort：运行前会重验清单、
 数组哈希、严格 5 分钟时间网格、OHLCV 领域规则和相关矩阵。训练/测试按时间
-滚动切分，训练标签与测试窗之间保留 label horizon + embargo；测试时每个时刻
-只允许一个现金现货 long/flat 仓位，并按预声明的 24 bps、48 bps 压力成本计费。
-即使探索门通过，报告仍固定为 `research_only` 和 `promotable=false`，不会注册
-champion、扩大交易白名单或发送订单。
+滚动切分，训练标签与测试窗之间保留 label horizon + embargo。V2 在每个训练折
+中再保留最后 30 天作为隔离校准窗，基础模型、校准窗和开发测试窗之间均有标签
+清除区间；Platt 概率校准只负责恢复真实置信度，单调 expected-return 映射再把分数
+转换为预期毛收益。
+
+V2 只有在预期毛收益严格超过 24 bps 往返成本和预声明安全余量时才允许一个现金
+SPOT long 仓位，否则持有现金；最短再次入场间隔候选为 48/96 根 5 分钟 K 线，
+另做 48 bps 压力测试。V1 的最后四个 sealed 折已经查看，因此 V2 只运行前五个
+回顾性开发折，并将旧 sealed 折标记为 retired，绝不把重复查看的历史伪装成全新
+OOS。任何结果仍固定为 `research_only` 和 `promotable=false`；只有新的 90 天
+前瞻公共 Shadow 才能提供新证据，且不会自动注册 champion、扩大白名单或下单。

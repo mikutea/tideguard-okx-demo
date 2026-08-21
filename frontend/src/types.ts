@@ -301,19 +301,34 @@ export interface ResearchMonitorStatus {
   };
   benchmark: null | {
     benchmarkId: string | null;
+    blockers: string[];
     cohortId: string | null;
     completedAt: string | null;
+    developmentGatePassed: boolean;
+    evaluationScope: string | null;
     exploratoryGatePassed: boolean;
     promotable: boolean;
     reportSha256: string | null;
     results: Array<{
+      calibrationImproved: boolean;
+      cashBarRate: number | null;
+      chosenPolicy: null | {
+        edgeBufferBps: number | null;
+        minEntrySpacingBars: number | null;
+        requiredGrossReturnBps: number | null;
+      };
       chosenThreshold: number | null;
+      developmentGatePassed: boolean;
       exploratoryGatePassed: boolean;
       family: string | null;
+      grossReturn: number | null;
       maxDrawdown: number | null;
+      maxInstrumentTradeShare: number | null;
       netReturn: number | null;
       trades: number;
+      tradesPerDay: number | null;
     }>;
+    schemaVersion: string | null;
     valid: boolean;
   };
   blockers: string[];

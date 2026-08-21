@@ -44,8 +44,14 @@ const blockerLabels: Record<string, string> = {
   multi_asset_oos_not_run: "多资产样本外评估尚未运行",
   benchmark_integrity_unverified: "样本外报告哈希尚未通过",
   multi_asset_oos_gate_failed: "多资产探索门未通过（仍保留研究证据）",
+  fixed_current_survivor_cohort: "当前为固定幸存者 cohort，存在幸存者偏差",
   requires_90_day_forward_public_shadow: "需完成至少 90 天前瞻公共 Shadow",
-  static_cost_only: "当前仅采用静态保守成本，尚未完成成交冲击校准"
+  static_cost_only: "当前仅采用静态保守成本，尚未完成成交冲击校准",
+  prior_sealed_folds_already_observed: "旧密封折已经查看，不再作为全新验证证据",
+  fresh_sealed_oos_unavailable: "V2 尚无新的密封样本外区间",
+  actual_account_fee_schedule_unbound: "尚未绑定账户实际费率，仅使用离线保守成本",
+  manual_model_review_required: "任何模型变更仍需人工复核",
+  probability_calibration_not_improved: "概率校准未改善，禁止晋级"
 };
 
 function bytes(value: number | undefined): string {
@@ -82,11 +88,12 @@ export function ResearchObservatory({ status }: { status: ResearchMonitorStatus 
   const bestBenchmark = [...(benchmark?.results ?? [])].sort(
     (left, right) => (right.netReturn ?? Number.NEGATIVE_INFINITY) - (left.netReturn ?? Number.NEGATIVE_INFINITY)
   )[0];
+  const isV2 = benchmark?.schemaVersion === "moheng.multi-asset-research.v2";
   const readinessSteps = [
     { label: "宇宙哈希", done: Boolean(universe?.valid) },
     { label: "完整历史", done: instruments.length > 0 && completeAssets === instruments.length },
     { label: "严格对齐", done: Boolean(status?.cohort?.manifestValid) },
-    { label: "模型 OOS", done: Boolean(benchmark?.valid) },
+    { label: isV2 ? "V2 开发评估" : "模型 OOS", done: Boolean(benchmark?.valid) },
     { label: "90 天 Shadow", done: false }
   ];
   const activeReadinessStep = readinessSteps.findIndex((step) => !step.done);
@@ -134,15 +141,23 @@ export function ResearchObservatory({ status }: { status: ResearchMonitorStatus 
       </section>
 
       <section className="workspace-panel weak-signal-panel" aria-labelledby="weak-signal-title">
-        <div className="panel-heading"><div><h2 id="weak-signal-title">新闻弱信号与对齐 cohort</h2><p>标题元数据只做消融研究，不直接触发买卖</p></div><Newspaper size={20} /></div>
+        <div className="panel-heading"><div><h2 id="weak-signal-title">成本感知策略与弱信号</h2><p>V2 先校准收益、扣除成本再决定交易；新闻仍只做消融研究</p></div><Newspaper size={20} /></div>
+        {isV2 ? <div className="v2-policy-flow" role="img" aria-label="原始模型分数经过时间隔离校准，转换为预期收益，越过成本和安全余量后才交易，否则持有现金">
+          <div><small>01</small><strong>模型分数</strong><span>开发折内生成</span></div>
+          <div><small>02</small><strong>隔离校准</strong><span>30 天独立窗口</span></div>
+          <div><small>03</small><strong>净收益门</strong><span>成本 + 安全余量</span></div>
+          <div><small>04</small><strong>交易 / 现金</strong><span>最低 4–8 小时再入场</span></div>
+        </div> : null}
         <dl className="evidence-list">
-          <div><dt>信号基线</dt><dd>{status?.signals.source ?? "GDELT metadata + VADER"}</dd></div>
-          <div><dt>文章正文</dt><dd>{status?.signals.fullTextStored ? "已保存" : "不保存"}</dd></div>
-          <div><dt>信号数据库</dt><dd>{status?.signals.available ? bytes(status.signals.databaseBytes) : "尚未采集"}</dd></div>
+          <div><dt>研究协议</dt><dd>{isV2 ? "V2 · 仅回顾性开发区间" : benchmark?.schemaVersion ?? "等待 V2 证据"}</dd></div>
           <div><dt>对齐 cohort</dt><dd>{status?.cohort ? shortId(status.cohort.cohortId, 16) : "等待完整历史"}</dd></div>
-          <div><dt>多资产 OOS</dt><dd>{benchmark?.valid ? shortId(benchmark.benchmarkId, 16) : "等待严格 cohort"}</dd></div>
-          <div><dt>已评估模型</dt><dd>{benchmark?.results.length ?? 0} 个固定家族</dd></div>
-          <div><dt>探索最优</dt><dd>{bestBenchmark ? `${bestBenchmark.family ?? "unknown"} · ${formatPercent(bestBenchmark.netReturn, 1)}` : "尚无结果"}</dd></div>
+          <div><dt>开发证据</dt><dd>{benchmark?.valid ? shortId(benchmark.benchmarkId, 16) : "等待严格 cohort"}</dd></div>
+          <div><dt>成本门</dt><dd>{bestBenchmark?.chosenPolicy ? `${bestBenchmark.chosenPolicy.requiredGrossReturnBps ?? "—"} bps · ${bestBenchmark.chosenPolicy.minEntrySpacingBars ?? "—"} bars` : "等待 V2 策略"}</dd></div>
+          <div><dt>毛 / 净收益</dt><dd>{bestBenchmark ? `${formatPercent(bestBenchmark.grossReturn, 1)} / ${formatPercent(bestBenchmark.netReturn, 1)}` : "尚无结果"}</dd></div>
+          <div><dt>现金占比</dt><dd>{bestBenchmark ? formatPercent(bestBenchmark.cashBarRate, 1) : "—"}</dd></div>
+          <div><dt>交易频率</dt><dd>{bestBenchmark?.tradesPerDay === null || bestBenchmark?.tradesPerDay === undefined ? "—" : `${bestBenchmark.tradesPerDay.toFixed(2)} 次 / 天`}</dd></div>
+          <div><dt>概率校准</dt><dd><StatusMark tone={bestBenchmark?.calibrationImproved ? "healthy" : "warning"}>{bestBenchmark?.calibrationImproved ? "Brier 已改善" : "未通过"}</StatusMark></dd></div>
+          <div><dt>新闻弱信号</dt><dd>{status?.signals.available ? `${status.signals.source ?? "GDELT + VADER"} · ${bytes(status.signals.databaseBytes)}` : "尚未采集"}</dd></div>
           <div><dt>可晋级</dt><dd><StatusMark tone="warning">否 · 前瞻证据不足</StatusMark></dd></div>
         </dl>
       </section>

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$CohortManifest = "",
-    [string]$Families = "hist_gradient_boosting,extra_trees,mlp,lightgbm,xgboost,catboost",
+    [string]$Families = "hist_gradient_boosting",
     [Nullable[int]]$MaxFolds = $null,
     [string]$Output = ""
 )
@@ -24,7 +24,7 @@ if (-not $CohortManifest) {
 }
 if (-not $Output) {
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
-    $Output = Join-Path $DataRoot "benchmarks\multi-asset-$stamp.json"
+    $Output = Join-Path $DataRoot "benchmarks\multi-asset-v2-$stamp.json"
 }
 if (-not (Test-Path -LiteralPath $ResearchPython -PathType Leaf)) {
     throw "Research runtime is missing. Run scripts/setup-research.ps1 first."
@@ -53,4 +53,4 @@ try {
     $env:PYTHONPATH = $PreviousPythonPath
 }
 
-Write-Host "Research-only benchmark evidence: $Output"
+Write-Host "V2 development-only research evidence: $Output"

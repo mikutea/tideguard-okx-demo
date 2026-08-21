@@ -9,6 +9,7 @@ import pytest
 from okx_demo_lab.ml.multi_asset_cohort import ValidatedCohort
 from okx_demo_lab.ml.multi_asset_research import (
     aggregate_portfolio_folds,
+    evaluate_cost_aware_portfolio,
     evaluate_portfolio_scores,
     portfolio_gate_failures,
     prepare_multi_asset_dataset,
@@ -105,6 +106,50 @@ def test_portfolio_evaluation_uses_one_non_overlapping_cash_position() -> None:
     assert metrics.gross_return == pytest.approx(1.01**4 - 1.0)
     assert metrics.net_return == pytest.approx(1.008**4 - 1.0)
     assert metrics.max_drawdown == 0.0
+    assert metrics.cash_bar_rate == pytest.approx(0.2)
+    assert metrics.trades_per_day == pytest.approx(4 / (10 / 288))
+
+
+def test_cost_aware_policy_can_hold_cash_and_enforces_entry_spacing() -> None:
+    labels = np.ones((20, 3), dtype=np.uint8)
+    returns = np.full((20, 3), 0.01, dtype=np.float64)
+    expected = np.zeros((20, 3), dtype=np.float64)
+    expected[0, 1] = 0.005
+    expected[8, 2] = 0.006
+
+    metrics = evaluate_cost_aware_portfolio(
+        labels,
+        returns,
+        expected,
+        cost_bps=20.0,
+        edge_buffer_bps=10.0,
+        holding_period_bars=2,
+        min_entry_spacing_bars=8,
+    )
+
+    assert metrics.trades == 2
+    assert metrics.trades_by_instrument == (0, 1, 1)
+    assert metrics.exposure_bars == 4
+    assert metrics.cash_bar_rate == pytest.approx(0.8)
+    assert metrics.average_gross_return == pytest.approx(0.01)
+    assert metrics.average_net_return == pytest.approx(0.008)
+
+
+def test_cost_aware_policy_stays_in_cash_without_net_edge() -> None:
+    metrics = evaluate_cost_aware_portfolio(
+        np.ones((20, 3), dtype=np.uint8),
+        np.full((20, 3), 0.01, dtype=np.float64),
+        np.full((20, 3), 0.003, dtype=np.float64),
+        cost_bps=20.0,
+        edge_buffer_bps=10.0,
+        holding_period_bars=2,
+        min_entry_spacing_bars=8,
+    )
+
+    assert metrics.trades == 0
+    assert metrics.cash_bar_rate == 1.0
+    assert metrics.gross_return == 0.0
+    assert metrics.net_return == 0.0
 
 
 def test_portfolio_aggregate_and_research_gate_remain_evidence_only() -> None:
@@ -124,6 +169,7 @@ def test_portfolio_aggregate_and_research_gate_remain_evidence_only() -> None:
 
     assert aggregate.folds == 2
     assert aggregate.trades == 6
+    assert aggregate.gross_return == pytest.approx((1.0 + fold.gross_return) ** 2 - 1.0)
     assert aggregate.net_return == pytest.approx((1.0 + fold.net_return) ** 2 - 1.0)
     assert portfolio_gate_failures(
         aggregate,

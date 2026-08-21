@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 from okx_demo_lab.ml.multi_asset_research import PreparedMultiAssetDataset
 from okx_demo_lab.ml.walk_forward import WalkForwardSpec, plan_walk_forward
 import research.multi_asset_benchmark as benchmark_module
 from research.multi_asset_benchmark import (
     MultiAssetBenchmarkError,
-    _evaluate_scores,
+    _evaluate_expected_returns,
+    _fold_training_windows,
     _inside_research_subdir,
     _write_report,
 )
@@ -39,19 +41,52 @@ def test_benchmark_result_is_always_research_only_and_shadow_blocked() -> None:
             expanding=False,
         ),
     )
-    scores = [
-        np.full((fold.test_stop - fold.test_start, 3), 0.9, dtype=np.float32)
+    expected_returns = [
+        np.full((fold.test_stop - fold.test_start, 3), 0.01, dtype=np.float32)
+        for fold in folds
+    ]
+    calibration = [
+        {
+            "developmentTest": {
+                "calibratedBrier": 0.19,
+                "rawBrier": 0.20,
+                "rows": (fold.test_stop - fold.test_start) * 3,
+            }
+        }
         for fold in folds
     ]
 
-    result = _evaluate_scores(dataset, folds, scores)
+    result = _evaluate_expected_returns(
+        dataset, folds, expected_returns, calibration
+    )
 
     assert result["decision"] == "research_only"
-    assert result["sealed"]["exploratoryGatePassed"] is False
-    assert "sealed_folds_unavailable" in result["sealed"]["failures"]
+    assert result["exploratoryGatePassed"] is False
+    assert result["sealed"]["evaluated"] is False
+    assert result["sealed"]["status"] == "retired_after_prior_observation"
+    assert "fresh_sealed_folds_unavailable" in result["sealed"]["failures"]
     assert "fixed_current_survivor_cohort" in result["promotionBlockers"]
+    assert "prior_sealed_folds_already_observed" in result["promotionBlockers"]
     assert "requires_90_day_forward_public_shadow" in result["promotionBlockers"]
     assert "manual_model_review_required" in result["promotionBlockers"]
+    assert result["chosenPolicy"]["minEntrySpacingBars"] in (48, 96)
+    assert result["calibration"]["improved"] is True
+
+
+def test_model_fit_and_calibration_windows_are_purged_and_disjoint() -> None:
+    fold = SimpleNamespace(train_start=100, train_stop=1_100)
+
+    fit_start, fit_stop, calibration_start, calibration_stop = (
+        _fold_training_windows(
+            fold,
+            calibration_bars=200,
+            calibration_purge_bars=13,
+        )
+    )
+
+    assert (fit_start, fit_stop) == (100, 887)
+    assert (calibration_start, calibration_stop) == (900, 1_100)
+    assert calibration_start - fit_stop == 13
 
 
 def test_benchmark_paths_are_confined_to_their_research_subdirectories(
