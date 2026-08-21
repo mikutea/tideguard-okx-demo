@@ -3,6 +3,7 @@ import {
   Braces,
   Check,
   CircleDashed,
+  Clock3,
   Database,
   FileWarning,
   LockKeyhole,
@@ -100,7 +101,7 @@ export function ResearchObservatory({ status }: { status: ResearchMonitorStatus 
         <div><Braces size={17} /><span>页预算</span><strong>{history ? `${history.pagesConsumed.toLocaleString("zh-CN")} / ${history.pageBudget.toLocaleString("zh-CN")}` : "—"}</strong></div>
         <div><Database size={17} /><span>公共仓库</span><strong>{bytes(history?.databaseBytes)}</strong></div>
         <div><ShieldCheck size={17} /><span>交易能力</span><strong>无</strong></div>
-        <div><span>最后证据</span><strong>{formatTime(history?.updatedAt)}</strong></div>
+        <div><Clock3 size={17} /><span>最后证据</span><strong>{formatTime(history?.updatedAt)}</strong></div>
       </div>
       {instruments.length ? <div className="asset-backfill-list">
         {instruments.map((item) => {
