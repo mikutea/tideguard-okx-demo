@@ -438,3 +438,54 @@ def test_monitor_surfaces_execution_aligned_v4_replay(tmp_path) -> None:
     _write_json(path, report)
 
     assert ResearchMonitor(root).status()["replay"]["valid"] is False
+
+
+def test_monitor_surfaces_v5_btc_execution_slice(tmp_path) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    path = root / "replays" / "historical-replay-v5-test.json"
+    report = _replay_report("cohort_" + "c" * 24)
+    report.pop("reportSha256")
+    report["schemaVersion"] = "moheng.historical-replay-report.v3"
+    report["execution"]["engineSchemaVersion"] = "moheng.historical-replay.v2"
+    report["leakageAudit"] = {"targetExecutionAligned": True}
+    report["model"]["targetContract"] = {
+        "decisionAt": "confirmed_bar_close",
+        "entryAt": "next_bar_open",
+        "exitAt": "entry_plus_12_bars_open",
+        "labelHorizonBars": 13,
+        "predictionUnit": "gross_return",
+    }
+    report["protocol"].update(
+        {
+            "developmentHistoryAlreadyObserved": True,
+            "executionLabelHorizonBars": 13,
+        }
+    )
+    report["result"]["historicalSelectionBias"] = {"resultMayBeOptimistic": True}
+    report["result"]["ordinary"]["broker"].update(
+        {"capacityHandling": "clip", "executionLabelHorizonBars": 13}
+    )
+    report["result"]["executionSlice"] = {
+        "decision": "research_only",
+        "developmentGatePassed": False,
+        "failures": ["execution_slice_trades_insufficient"],
+        "instrument": "BTC-USDT",
+        "ordinary": {"maxDrawdown": 0.01, "netReturn": 0.006, "trades": 4},
+        "stress48Bps": {"netReturn": 0.001, "trades": 4},
+    }
+    report["reportSha256"] = sha256_hex(canonical_json(report))
+    _write_json(path, report)
+
+    replay = ResearchMonitor(root).status()["replay"]
+
+    assert replay["valid"] is True
+    assert replay["executionSlice"] == {
+        "developmentGatePassed": False,
+        "failures": ["execution_slice_trades_insufficient"],
+        "instrument": "BTC-USDT",
+        "maxDrawdown": 0.01,
+        "netReturn": 0.006,
+        "stressNetReturn": 0.001,
+        "trades": 4,
+    }

@@ -111,7 +111,7 @@ def pack(autonomy: AutonomyStore, registry: FakeRegistry, *, state="validated"):
         "generation": registry.get_generation(),
         "models": [model_review(state)],
         "promotionPolicy": {},
-        "schemaVersion": "tideguard.codex-review.v1",
+        "schemaVersion": "tideguard.codex-review.v2",
     }
 
 
@@ -185,6 +185,35 @@ def test_codex_approval_is_evidence_bound_and_applied_after_promotion(
     assert decisions[0]["kind"] == "promote"
     assert decisions[0]["appliedAt"] is not None
     assert audit.events[0][0] == "ml.codex_promoted"
+
+
+def test_live_readiness_separates_evidence_from_disabled_deployment(tmp_path):
+    instance, _, _, _ = supervisor(tmp_path)
+    readiness = instance.live_readiness(
+        champion={"modelId": MODEL_ID},
+        models=[
+            {
+                "modelId": MODEL_ID,
+                "shadow": {
+                    "settledBuys": 100,
+                    "durationDays": 90.0,
+                    "netReturn": 0.02,
+                    "maxDrawdown": 0.01,
+                    "protocolVersion": "moheng.shadow.next-open-bracket.v2",
+                },
+            }
+        ],
+        demo_performance={
+            "closedPositions": 30,
+            "netReturn": 0.01,
+            "maxDrawdown": 0.01,
+        },
+    )
+
+    assert readiness["evidenceGatePassed"] is True
+    assert readiness["readyForLive"] is False
+    assert readiness["automatedLiveExecutionEnabled"] is False
+    assert readiness["deploymentBlockers"] == ["live_ai_execution_disabled"]
 
 
 def test_codex_lease_requires_user_demo_master_and_becomes_active_only_after_audit(
@@ -402,7 +431,7 @@ def test_cross_cohort_comparison_uses_the_paired_champion_recipe_and_fails_close
             return {"modelId": "champion", "artifactSha256": "c" * 64, "generation": 1}
 
     class ShadowOnlyAutonomy:
-        def shadow_summary(self, _model_id):
+        def shadow_summary(self, _model_id, *, policy_sha256=None):
             return {
                 "settledBuys": 25,
                 "durationDays": 8.0,
@@ -475,7 +504,7 @@ def test_review_fails_closed_when_the_bound_market_snapshot_is_not_current(tmp_p
             return None
 
     class SnapshotAutonomy:
-        def shadow_summary(self, _model_id):
+        def shadow_summary(self, _model_id, *, policy_sha256=None):
             return {
                 "settledBuys": 25,
                 "durationDays": 8.0,

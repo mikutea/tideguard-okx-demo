@@ -44,4 +44,5 @@ OKX 官方将 API 权限分为 Read、Trade、Withdraw。Trade 不只代表下�
 - 自动测试、CI、构建或安装过程绝不访问真实私有 API，也不会发送实盘订单。
 - Demo 的 Codex lease 不能在 Live 复用。
 - Live 不接受后台 AI 自动入场；先用全历史研究、shadow 和 Demo 成交证据验证。未来若开放，需要新的实盘专属授权、资金预算、前瞻 canary 门槛与单独审查。
+- 当前只读 Live readiness 明确要求同一 champion 的 90 天/100 笔前瞻 Shadow、30 笔 Demo 闭环、两侧正净结果及不高于 3% 的回撤；通过这些条件仍不会启用 Live AI，只会把“证据不足”和“部署能力禁用”两个问题分开显示。
 - 环境切换不接受条款、开通产品、修改 KYC、安全设置或 API 权限；这些始终由用户在 OKX 完成。

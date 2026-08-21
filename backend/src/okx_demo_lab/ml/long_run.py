@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..audit import AuditStore
 from ..build_info import BUILD_REVISION
@@ -19,7 +19,14 @@ from ..service import (
     CommitBlockedBeforeDispatch,
     TradingService,
 )
-from .autonomy import AutonomyError, AutonomyPolicy, AutonomyStore, PositionStateError
+from .autonomy import (
+    LEGACY_SHADOW_PROTOCOL_VERSION,
+    SHADOW_PROTOCOL_VERSION,
+    AutonomyError,
+    AutonomyPolicy,
+    AutonomyStore,
+    PositionStateError,
+)
 from .pipeline import (
     BAR_MILLISECONDS,
     DEFAULT_LABEL_HORIZON,
@@ -475,17 +482,30 @@ class LongRunCoordinator:
         if not pending:
             return
         candle_by_time = {row.closed_at: row for row in candles}
-        missing = [
-            row
-            for row in pending
-            if _parse_iso(str(row["due_at"])) not in candle_by_time
-            or _parse_iso(str(row["candle_closed_at"])) not in candle_by_time
-        ]
+        missing = []
+        for row in pending:
+            if str(row.get("protocol_version") or LEGACY_SHADOW_PROTOCOL_VERSION) != SHADOW_PROTOCOL_VERSION:
+                continue
+            signal_at = _parse_iso(str(row["candle_closed_at"]))
+            required = [
+                signal_at + timedelta(milliseconds=BAR_MILLISECONDS * offset)
+                for offset in range(1, self.policy.hold_bars + 2)
+            ]
+            if any(required_at not in candle_by_time for required_at in required):
+                missing.append(row)
         if missing:
             history = await self.client.get_history_candles(limit=SHADOW_RECOVERY_CANDLES)
             recovered = parse_completed_candles(history, now=now)
             candle_by_time.update({row.closed_at: row for row in recovered})
         for row in pending:
+            protocol_version = str(
+                row.get("protocol_version") or LEGACY_SHADOW_PROTOCOL_VERSION
+            )
+            if protocol_version != SHADOW_PROTOCOL_VERSION:
+                self.autonomy.exclude_legacy_shadow(str(row["signal_id"]), now=now)
+                continue
+            if row.get("policy_sha256") != self.policy.policy_sha256:
+                raise LongRunError("a due shadow signal is bound to a different policy")
             entry_at = _parse_iso(str(row["candle_closed_at"]))
             due_at = _parse_iso(str(row["due_at"]))
             path = [
@@ -494,25 +514,41 @@ class LongRunCoordinator:
                 if entry_at + timedelta(milliseconds=BAR_MILLISECONDS * offset)
                 in candle_by_time
             ]
-            if len(path) != self.policy.hold_bars or path[-1].closed_at != due_at:
+            exit_candle_at = entry_at + timedelta(
+                milliseconds=BAR_MILLISECONDS * (self.policy.hold_bars + 1)
+            )
+            exit_candle = candle_by_time.get(exit_candle_at)
+            if (
+                len(path) != self.policy.hold_bars
+                or exit_candle is None
+                or exit_candle.closed_at != due_at
+            ):
                 raise LongRunError("a due shadow signal has an incomplete holding path")
-            entry_close = _decimal(row["entry_close"], "shadow entry close")
-            stop_price = entry_close * (Decimal("1") - self.policy.stop_loss_fraction)
-            take_price = entry_close * (Decimal("1") + self.policy.take_profit_fraction)
-            exit_close: Decimal | None = None
+            entry_open = Decimal(str(path[0].open))
+            per_side_cost = self.policy.round_trip_cost_bps / Decimal("20000")
+            entry_fill = entry_open * (Decimal("1") + per_side_cost)
+            stop_price = entry_fill * (Decimal("1") - self.policy.stop_loss_fraction)
+            take_price = entry_fill * (Decimal("1") + self.policy.take_profit_fraction)
+            exit_price: Decimal | None = None
+            exit_reason: Literal["stop_loss", "take_profit", "time_exit"] = "time_exit"
             for candle in path:
                 if Decimal(str(candle.low)) <= stop_price:
-                    exit_close = stop_price
+                    exit_price = stop_price
+                    exit_reason = "stop_loss"
                     break
                 if Decimal(str(candle.high)) >= take_price:
-                    exit_close = take_price
+                    exit_price = take_price
+                    exit_reason = "take_profit"
                     break
-            if exit_close is None:
-                exit_close = Decimal(str(path[-1].close))
+            if exit_price is None:
+                exit_price = Decimal(str(exit_candle.open))
             self.autonomy.settle_shadow(
                 str(row["signal_id"]),
-                exit_close=exit_close,
+                entry_open=entry_open,
+                exit_price=exit_price,
                 round_trip_cost_bps=float(self.policy.round_trip_cost_bps),
+                exit_reason=exit_reason,
+                policy_sha256=self.policy.policy_sha256,
                 now=now,
             )
 
@@ -525,7 +561,7 @@ class LongRunCoordinator:
         features, candle_closed_at = latest_features(candles)
         entry_close = Decimal(str(candles[-1].close))
         due_at = candle_closed_at + timedelta(
-            milliseconds=BAR_MILLISECONDS * DEFAULT_LABEL_HORIZON
+            milliseconds=BAR_MILLISECONDS * (self.policy.hold_bars + 1)
         )
         for metadata in self.registry.list_models(limit=100):
             if metadata["state"] not in {"validated", "champion", "retired"}:
@@ -545,6 +581,8 @@ class LongRunCoordinator:
                 action="buy",
                 score=score,
                 entry_close=entry_close,
+                policy_sha256=self.policy.policy_sha256,
+                round_trip_cost_bps=float(self.policy.round_trip_cost_bps),
             )
 
     def _market_values(self, bundle: dict[str, Any], *, now: datetime) -> dict[str, Decimal]:

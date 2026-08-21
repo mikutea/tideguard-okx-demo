@@ -67,6 +67,9 @@ def test_policy_replay_is_always_research_only_and_shadow_days_stay_zero() -> No
     assert result["ordinary"]["leakageGuard"]["sameBarFillAllowed"] is False
     assert result["stress48Bps"]["broker"]["roundTripCostBps"] == 48.0
     assert result["ordinary"]["broker"]["capacityHandling"] == "clip"
+    assert result["executionSlice"]["instrument"] == "BTC-USDT"
+    assert result["executionSlice"]["decision"] == "research_only"
+    assert result["executionSlice"]["ordinary"]["trades"] >= 1
 
 
 def test_execution_targets_match_next_open_and_fixed_horizon_exit() -> None:

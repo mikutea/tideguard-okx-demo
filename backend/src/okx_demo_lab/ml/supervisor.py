@@ -23,7 +23,10 @@ from .strategy import canonical_json, sha256_hex
 from .walk_forward import ValidationReport
 
 
-SUPERVISOR_REVIEW_SCHEMA = "tideguard.codex-review.v1"
+SUPERVISOR_REVIEW_SCHEMA = "tideguard.codex-review.v2"
+LIVE_SHADOW_MIN_SETTLED = 100
+LIVE_SHADOW_MIN_DAYS = 90
+LIVE_DEMO_MIN_CLOSED_POSITIONS = 30
 
 
 def _utc(value: datetime) -> datetime:
@@ -92,7 +95,10 @@ class CodexSupervisor:
                     "trades": report.trades,
                     "worstFoldNetReturn": report.worst_fold_net_return,
                 }
-            shadow = self.autonomy.shadow_summary(str(model["modelId"]))
+            shadow = self.autonomy.shadow_summary(
+                str(model["modelId"]),
+                policy_sha256=self.autonomy_policy.policy_sha256,
+            )
             shadow_failures = self.shadow_failures(shadow)
             reviews.append(
                 {
@@ -207,8 +213,66 @@ class CodexSupervisor:
             failures.append("shadow_drawdown_above_limit")
         return tuple(failures)
 
+    def live_readiness(
+        self,
+        *,
+        champion: dict[str, Any] | None,
+        models: list[dict[str, Any]],
+        demo_performance: dict[str, Any],
+    ) -> dict[str, Any]:
+        champion_review = next(
+            (
+                model
+                for model in models
+                if champion and model["modelId"] == champion.get("modelId")
+            ),
+            None,
+        )
+        shadow = champion_review.get("shadow") if champion_review else {}
+        evidence_failures: list[str] = []
+        if champion_review is None:
+            evidence_failures.append("live_champion_missing")
+        if int(shadow.get("settledBuys") or 0) < LIVE_SHADOW_MIN_SETTLED:
+            evidence_failures.append("live_shadow_buys_insufficient")
+        if float(shadow.get("durationDays") or 0.0) < LIVE_SHADOW_MIN_DAYS:
+            evidence_failures.append("live_shadow_duration_insufficient")
+        if float(shadow.get("netReturn") or 0.0) <= 0:
+            evidence_failures.append("live_shadow_net_return_not_positive")
+        if float(shadow.get("maxDrawdown", 1.0)) > float(
+            self.autonomy_policy.max_demo_drawdown
+        ):
+            evidence_failures.append("live_shadow_drawdown_above_limit")
+        if int(demo_performance.get("closedPositions") or 0) < LIVE_DEMO_MIN_CLOSED_POSITIONS:
+            evidence_failures.append("live_demo_round_trips_insufficient")
+        if float(demo_performance.get("netReturn") or 0.0) <= 0:
+            evidence_failures.append("live_demo_net_return_not_positive")
+        if float(demo_performance.get("maxDrawdown", 1.0)) > float(
+            self.autonomy_policy.max_demo_drawdown
+        ):
+            evidence_failures.append("live_demo_drawdown_above_limit")
+        return {
+            "automatedLiveExecutionEnabled": False,
+            "deploymentBlockers": ["live_ai_execution_disabled"],
+            "evidenceFailures": evidence_failures,
+            "evidenceGatePassed": not evidence_failures,
+            "modelId": champion.get("modelId") if champion else None,
+            "policy": {
+                "maxDrawdown": str(self.autonomy_policy.max_demo_drawdown),
+                "minimumDemoClosedPositions": LIVE_DEMO_MIN_CLOSED_POSITIONS,
+                "minimumProspectiveShadowBuys": LIVE_SHADOW_MIN_SETTLED,
+                "minimumProspectiveShadowDays": LIVE_SHADOW_MIN_DAYS,
+                "requiresPositiveDemoNetReturn": True,
+                "requiresPositiveShadowNetReturn": True,
+                "shadowProtocolVersion": shadow.get("protocolVersion"),
+            },
+            "readyForLive": False,
+        }
+
     def review_pack(self, *, now: datetime) -> dict[str, Any]:
         generated = _utc(now)
+        champion = self.registry.champion_summary()
+        demo_performance = self.autonomy.demo_performance()
+        models = self._model_reviews()
         body = {
             "auditChainValid": self.audit.verify_chain(),
             "autonomyPolicy": {
@@ -217,18 +281,22 @@ class CodexSupervisor:
             },
             "autonomyState": self.autonomy.state(),
             "activePosition": self.autonomy.active_position(),
-            "champion": self.registry.champion_summary(),
-            "demoPerformance": self.autonomy.demo_performance(),
+            "champion": champion,
+            "demoPerformance": demo_performance,
             "generatedAt": _iso(generated),
             "generation": self.registry.get_generation(),
-            "models": self._model_reviews(),
+            "liveReadiness": self.live_readiness(
+                champion=champion,
+                models=models,
+                demo_performance=demo_performance,
+            ),
+            "models": models,
             "promotionPolicy": {
                 **self.promotion_policy.to_dict(),
                 "policySha256": self.promotion_policy.policy_sha256,
             },
             "schemaVersion": SUPERVISOR_REVIEW_SCHEMA,
         }
-        champion = body["champion"]
         body["championSupervisorApproved"] = bool(
             champion
             and self.autonomy.applied_champion_decision(

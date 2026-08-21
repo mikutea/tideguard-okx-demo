@@ -13,9 +13,9 @@ v0.4 默认使用 **OKX 模拟盘**。它同时提供隔离的 OKX Live 连接�
 - OKX 官方公共 `BTC-USDT / SPOT / 5m` 历史可恢复回填；当前接口实测可追溯到 2018-01-11，具体起点每次仍以官方空页为准。
 - 独立 `market-data.sqlite3`：确认线、严格时间网格、内容冲突隔离、缺口门、流式快照 SHA-256 和断点续传。
 - NumPy 向量化的冻结线性逻辑候选；三组预声明配置共享同一特征矩阵和相同 OOS cohort。
-- v4 rolling walk-forward：365 天训练、13 bars purge/embargo、90 天非重叠 OOS、long/flat、非重叠资本、止损/止盈和 24 bps 压力成本。
+- v5 rolling walk-forward：365 天训练、末 30 天隔离校准、13 bars purge、每 30 天重训/回放、long/flat、非重叠资本和 24/48 bps 成本；单独报告多币研究组合与 BTC 执行切片。
 - challenger 优先与同 cohort champion 比较；跨 cohort 时使用新快照内同 `trainingConfigSha256` 的 champion 配方基线，缺失即失败关闭。
-- 新候选必须经过确定性门、未来 Shadow、Codex 脱敏证据审查和 generation CAS；训练失败不会替换当前 champion。
+- 新候选必须经过确定性门、与下一根开盘成交一致的 Future Shadow、Codex 脱敏证据审查和 generation CAS；协议或策略哈希不一致的旧 Shadow 不计入晋级，训练失败不会替换当前 champion。
 - Demo 自动订单使用限价 IOC，按真实累计成交和费用记录模型自有库存；未知提交绝不盲重试。
 - 常驻后台负责训练调度、持仓恢复、CAA 失联保护、退出管理和审计；关闭 UI 不代表停止后台。
 - “墨衡”专业驾驶舱包含运行中心、数据谱系、训练阶段、walk-forward 矩阵、模型谱系、执行与风险、问题中心及 Demo/Live 设置。
@@ -92,7 +92,7 @@ Codex Supervisor 只读取脱敏的模型/数据/策略哈希和验证指标：
 .\.venv\Scripts\python.exe -m okx_demo_lab.cli supervisor review
 ```
 
-完整说明见 [模型架构](docs/ML-ARCHITECTURE.md)、[长期自动量化架构](docs/AUTONOMY-ARCHITECTURE.md) 和 [历史数据仓库](docs/HISTORY-DATA.md)。历史高速回放可用 `scripts/run-historical-replay.ps1` 在冻结多资产 cohort 上按 30 天周期重训并回放。V4 已将标签对齐到下一根开盘成交与 12 根后退出；最新历史开发结果和集中度限制见 [V4 执行对齐历史收益诊断](docs/reports/v4-profitability/report.html)。它固定为研究证据，不能累计 Shadow 天数或触发订单。
+完整说明见 [模型架构](docs/ML-ARCHITECTURE.md)、[长期自动量化架构](docs/AUTONOMY-ARCHITECTURE.md) 和 [历史数据仓库](docs/HISTORY-DATA.md)。历史高速回放可用 `scripts/run-historical-replay.ps1` 在冻结多资产 cohort 上按 30 天周期重训并回放。V5 将标签对齐到下一根开盘成交与 12 根后退出，并单独结算 BTC-USDT 执行白名单；最新结果和上线缺口见 [V5 BTC 执行就绪度诊断](docs/reports/v5-execution-readiness/report.md)。它固定为研究证据，不能累计 Shadow 天数或触发订单。
 
 ## 第三方模型研究层
 

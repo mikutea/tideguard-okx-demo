@@ -133,6 +133,7 @@ def test_supervisor_lease_is_content_addressed_and_strictly_bounded(tmp_path):
 
 def test_shadow_sell_never_receives_short_profit(tmp_path):
     db = store(tmp_path)
+    policy = AutonomyPolicy()
     buy_id = db.record_shadow_signal(
         model_id="mdl_" + "1" * 24,
         artifact_sha256=HASH_A,
@@ -141,6 +142,8 @@ def test_shadow_sell_never_receives_short_profit(tmp_path):
         action="buy",
         score=0.8,
         entry_close=Decimal("100"),
+        policy_sha256=policy.policy_sha256,
+        round_trip_cost_bps=10,
     )
     sell_id = db.record_shadow_signal(
         model_id="mdl_" + "1" * 24,
@@ -150,23 +153,60 @@ def test_shadow_sell_never_receives_short_profit(tmp_path):
         action="sell",
         score=0.2,
         entry_close=Decimal("100"),
+        policy_sha256=policy.policy_sha256,
+        round_trip_cost_bps=10,
     )
     db.settle_shadow(
         buy_id,
-        exit_close=Decimal("110"),
+        entry_open=Decimal("100"),
+        exit_price=Decimal("110"),
         round_trip_cost_bps=10,
+        exit_reason="time_exit",
+        policy_sha256=policy.policy_sha256,
         now=NOW + timedelta(hours=1),
     )
     db.settle_shadow(
         sell_id,
-        exit_close=Decimal("90"),
+        entry_open=Decimal("100"),
+        exit_price=Decimal("90"),
         round_trip_cost_bps=10,
+        exit_reason="time_exit",
+        policy_sha256=policy.policy_sha256,
         now=NOW + timedelta(hours=2),
     )
-    summary = db.shadow_summary("mdl_" + "1" * 24)
+    summary = db.shadow_summary(
+        "mdl_" + "1" * 24, policy_sha256=policy.policy_sha256
+    )
     assert summary["settledSignals"] == 2
     assert summary["settledBuys"] == 1
-    assert summary["netReturn"] == pytest.approx(0.099)
+    assert summary["netReturn"] == pytest.approx((110 * 0.9995) / (100 * 1.0005) - 1)
+
+
+def test_shadow_settlement_is_bound_to_the_frozen_policy(tmp_path):
+    db = store(tmp_path)
+    policy = AutonomyPolicy()
+    signal_id = db.record_shadow_signal(
+        model_id="mdl_" + "1" * 24,
+        artifact_sha256=HASH_A,
+        candle_closed_at=NOW,
+        due_at=NOW + timedelta(minutes=65),
+        action="buy",
+        score=0.8,
+        entry_close=Decimal("100"),
+        policy_sha256=policy.policy_sha256,
+        round_trip_cost_bps=24,
+    )
+
+    with pytest.raises(AutonomyError, match="frozen policy"):
+        db.settle_shadow(
+            signal_id,
+            entry_open=Decimal("101"),
+            exit_price=Decimal("102"),
+            round_trip_cost_bps=24,
+            exit_reason="time_exit",
+            policy_sha256=HASH_B,
+            now=NOW + timedelta(minutes=65),
+        )
 
 
 def test_position_uses_only_confirmed_fills_and_closes_exact_inventory(tmp_path):
@@ -480,9 +520,60 @@ def test_v1_autonomy_database_migrates_training_progress_without_losing_runs(tmp
             """
         )
     migrated = AutonomyStore(path)
-    assert migrated.summary()["schemaVersion"] == "tideguard.autonomy.v2"
+    assert migrated.summary()["schemaVersion"] == "tideguard.autonomy.v3"
     latest = migrated.latest_training()
     assert latest and latest["runId"] == "train_legacy"
     assert latest["phase"] == "completed"
     assert latest["progressCurrent"] == 0
     assert latest["snapshotId"] is None
+
+
+def test_v2_shadow_rows_are_migrated_but_excluded_from_v2_evidence(tmp_path):
+    path = tmp_path / "legacy-shadow.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            """
+            CREATE TABLE autonomy_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                schema_version TEXT NOT NULL,
+                desired_mode TEXT NOT NULL,
+                runtime_status TEXT NOT NULL,
+                credential_fingerprint TEXT,
+                account_fingerprint TEXT,
+                suspended_reason TEXT,
+                state_version INTEGER NOT NULL,
+                enabled_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO autonomy_state VALUES
+                (1, 'tideguard.autonomy.v2', 'disabled', 'disabled',
+                 NULL, NULL, NULL, 0, NULL, '2026-08-20T00:00:00.000Z');
+            CREATE TABLE shadow_signals (
+                signal_id TEXT PRIMARY KEY,
+                model_id TEXT NOT NULL,
+                artifact_sha256 TEXT NOT NULL,
+                candle_closed_at TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                action TEXT NOT NULL,
+                score REAL NOT NULL,
+                entry_close TEXT NOT NULL,
+                exit_close TEXT,
+                net_return REAL,
+                settled_at TEXT,
+                UNIQUE(model_id, candle_closed_at)
+            );
+            INSERT INTO shadow_signals VALUES
+                ('shadow_legacy', 'mdl_111111111111111111111111',
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 '2026-08-20T00:00:00.000Z', '2026-08-20T01:00:00.000Z',
+                 'buy', 0.8, '100', '110', 0.09, '2026-08-20T01:00:00.000Z');
+            """
+        )
+
+    migrated = AutonomyStore(path)
+    summary = migrated.shadow_summary(
+        "mdl_" + "1" * 24, policy_sha256=AutonomyPolicy().policy_sha256
+    )
+    assert migrated.summary()["schemaVersion"] == "tideguard.autonomy.v3"
+    assert summary["settledBuys"] == 0
+    assert summary["excludedLegacyOrPolicyMismatch"] == 1

@@ -75,13 +75,15 @@ registry 在写入 validation 前逐项核对 manifest/report；不一致的候�
 
 ## Future Shadow
 
-每个 validated/champion 在新的已完成 K 线上生成不可执行 shadow BUY。结算使用与执行一致的 bracket、12 根持有窗口和 24 bps 成本。晋级至少需要 20 个已结算 BUY、7 天跨度、正净结果和不高于硬上限的 shadow 回撤。
+每个 validated/champion 在新的已完成 K 线上生成不可执行 shadow BUY。`moheng.shadow.next-open-bracket.v2` 固定为“确认线收盘决策、下一根开盘入场、12 根持有、再下一根开盘时间退出”；止损与止盈同根触发时先按止损结算，24 bps 成本按双边乘法进入成交价。每条记录绑定 artifact、协议版本和 `AutonomyPolicy` 哈希。旧收盘价成交口径及策略哈希不一致的数据会保留审计痕迹，但不会计入新证据。
+
+Demo 候选晋级的最小 Shadow 门仍为 20 个已结算 BUY、7 天跨度、正净结果和不高于 3% 的回撤。面向未来 Live 的独立证据门更高：同一 champion 至少 90 天、100 个前瞻 BUY，加上至少 30 个 Demo 闭环、Shadow 与 Demo 都为正净结果且回撤不高于 3%。这些门只表达证据充足度；当前 Live AI 自动执行仍物理禁用。
 
 Shadow 是前瞻证据，但仍不是成交证明；实际 Demo 的滑点、成交率、费用、残余和 CAA 状态继续独立监测。
 
 ## Codex Supervisor
 
-`CodexSupervisor.review_pack()` 只包含脱敏状态、artifact/report/snapshot/policy 哈希、同口径 OOS、Shadow、Demo 净成本结果和审计链状态。它不读取 API Secret，也不能选择 Demo/Live、修改品种、资金或 kill。
+`CodexSupervisor.review_pack()` 只包含脱敏状态、artifact/report/snapshot/policy 哈希、同口径 OOS、Shadow、Demo 净成本结果、Live 证据缺口和审计链状态。它不读取 API Secret，也不能选择 Demo/Live、修改品种、资金或 kill。
 
 允许的决策：
 
@@ -111,7 +113,7 @@ v0.4 不把 Freqtrade/FreqAI 打进 EXE。未来适配时只能作为独立 loca
 - OHLC 无法确定同一根内止损/止盈先后，验证按更不利结果。
 - 通过历史 OOS 与 Shadow 仍可能在未来失效；没有模型能保证盈利。
 
-## Historical replay V4
+## Historical replay V5
 
 `research/historical_replay.py` 在隔离研究环境中对最新冻结多资产 cohort 运行高速
 因果回放。它采用 365 天滚动训练协议，末 30 天作为隔离校准窗、此前数据拟合基础
@@ -130,7 +132,12 @@ HistGradientBoostingClassifier，不在同一 canonical run 中按最终收益�
 周期；因此它不是封存 OOS 或未来盈利证明。完整诊断见
 `docs/reports/v4-profitability/report.html`。
 
-V4 报告是可重复审计的开发证据，不进入模型注册表，不累计 Shadow 天数，不修改
+V5 在同一预测矩阵上增加当前 `BTC-USDT` 执行白名单的独立现金账本。它得到 24 bps
+净收益 `+0.9311%`、48 bps 压力净收益 `+0.2309%`、最大回撤 `0.6577%`，但只有
+10 笔闭环，低于 20 笔开发门；因此组合收益与 BTC 可执行证据在报告和 UI 中被明确
+分离。完整诊断见 `docs/reports/v5-execution-readiness/report.md`。
+
+V5 报告是可重复审计的开发证据，不进入模型注册表，不累计 Shadow 天数，不修改
 执行白名单，也不具备订单能力。训练中心的播放、步进和速度按钮只是对报告检查点的
 本地可视化，不是后台交易控制器。
 - Live 仅支持独立人工限时交易，AI 自动入场在 v0.4 硬禁用。

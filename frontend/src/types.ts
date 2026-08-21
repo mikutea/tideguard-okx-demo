@@ -379,6 +379,15 @@ export interface HistoricalReplayStatus {
     replayStopAt: string | null;
     trainingSeconds: number | null;
   }>;
+  executionSlice: null | {
+    developmentGatePassed: boolean;
+    failures: string[];
+    instrument: string | null;
+    maxDrawdown: number | null;
+    netReturn: number | null;
+    stressNetReturn: number | null;
+    trades: number;
+  };
   family: string | null;
   finalCash: number | null;
   firstReplayAt: string | null;
@@ -558,6 +567,9 @@ export interface SupervisorModelReview {
     durationDays: number;
     firstSignalAt: string | null;
     lastSettledAt: string | null;
+    protocolVersion: string;
+    policySha256: string | null;
+    excludedLegacyOrPolicyMismatch: number;
   };
 }
 
@@ -678,6 +690,23 @@ export interface LongRunStatus {
     championSupervisorApproved: boolean;
     demoPerformance: LongRunStatus["demoPerformance"];
     generation: number;
+    liveReadiness: {
+      automatedLiveExecutionEnabled: false;
+      deploymentBlockers: string[];
+      evidenceFailures: string[];
+      evidenceGatePassed: boolean;
+      modelId: string | null;
+      policy: {
+        maxDrawdown: string;
+        minimumDemoClosedPositions: number;
+        minimumProspectiveShadowBuys: number;
+        minimumProspectiveShadowDays: number;
+        requiresPositiveDemoNetReturn: boolean;
+        requiresPositiveShadowNetReturn: boolean;
+        shadowProtocolVersion: string | null;
+      };
+      readyForLive: false;
+    };
     models: SupervisorModelReview[];
   };
   lastError: null | {

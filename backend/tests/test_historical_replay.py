@@ -157,3 +157,23 @@ def test_policy_uses_actual_round_trip_cost_plus_edge_buffer() -> None:
     assert stress["policy"]["requiredGrossReturnBps"] == 60.0
     assert len(ordinary["trades"]) == 1
     assert stress["trades"] == []
+
+
+def test_replay_can_isolate_the_btc_execution_allowlist_slice() -> None:
+    timestamps, candles = _market()
+    expected = np.zeros((80, 1), dtype=np.float64)
+    expected[2, 0] = 0.02
+
+    result = run_historical_replay(
+        ("BTC-USDT",),
+        timestamps,
+        np.ascontiguousarray(candles[:, :1, :]),
+        expected,
+        np.zeros(80, dtype=np.int64),
+        (ReplayEpisodeBinding("replay_episode_btc", int(timestamps[0])),),
+        policy=ReplayPolicy(edge_buffer_bps=12.0, min_entry_spacing_bars=24),
+        broker=ReplayBrokerConfig(checkpoint_stride_bars=12),
+    )
+
+    assert result["tradesByInstrument"] == {"BTC-USDT": 1}
+    assert {trade["instrument"] for trade in result["trades"]} == {"BTC-USDT"}

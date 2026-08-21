@@ -265,7 +265,11 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
     if not replay_root.is_dir():
         return None
     candidates: list[tuple[int, Path]] = []
-    for pattern in ("historical-replay-v4-*.json", "historical-replay-v3-*.json"):
+    for pattern in (
+        "historical-replay-v5-*.json",
+        "historical-replay-v4-*.json",
+        "historical-replay-v3-*.json",
+    ):
         for path in replay_root.glob(pattern):
             try:
                 candidates.append((path.stat().st_mtime_ns, path))
@@ -301,6 +305,28 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
         )
         stress = result_value.get("stress48Bps")
         stress_value = stress if isinstance(stress, dict) else {}
+        execution_slice = result_value.get("executionSlice")
+        execution_slice_value = (
+            execution_slice if isinstance(execution_slice, dict) else {}
+        )
+        execution_slice_ordinary = execution_slice_value.get("ordinary")
+        execution_slice_ordinary_value = (
+            execution_slice_ordinary
+            if isinstance(execution_slice_ordinary, dict)
+            else {}
+        )
+        execution_slice_stress = execution_slice_value.get("stress48Bps")
+        execution_slice_stress_value = (
+            execution_slice_stress
+            if isinstance(execution_slice_stress, dict)
+            else {}
+        )
+        execution_slice_failures = execution_slice_value.get("failures")
+        execution_slice_failures_value = (
+            [item for item in execution_slice_failures if isinstance(item, str)]
+            if isinstance(execution_slice_failures, list)
+            else []
+        )
         policy = result_value.get("chosenPolicy")
         policy_value = policy if isinstance(policy, dict) else {}
         selection_bias = result_value.get("historicalSelectionBias")
@@ -308,7 +334,11 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
             selection_bias if isinstance(selection_bias, dict) else {}
         )
         v4_contract_valid = bool(
-            schema_version != "moheng.historical-replay-report.v2"
+            schema_version
+            not in {
+                "moheng.historical-replay-report.v2",
+                "moheng.historical-replay-report.v3",
+            }
             or (
                 execution_value.get("engineSchemaVersion")
                 == "moheng.historical-replay.v2"
@@ -326,14 +356,30 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
                 and selection_bias_value.get("resultMayBeOptimistic") is True
             )
         )
+        v5_contract_valid = bool(
+            schema_version != "moheng.historical-replay-report.v3"
+            or (
+                execution_slice_value.get("instrument") == "BTC-USDT"
+                and execution_slice_value.get("decision") == "research_only"
+                and bool(execution_slice_ordinary_value)
+                and bool(execution_slice_stress_value)
+                and isinstance(execution_slice_failures, list)
+                and len(execution_slice_failures_value)
+                == len(execution_slice_failures)
+                and execution_slice_value.get("developmentGatePassed")
+                is (len(execution_slice_failures_value) == 0)
+            )
+        )
         valid = bool(
             _canonical_hash_matches(value, report_hash, excluded={"reportSha256"})
             and schema_version
             in {
                 "moheng.historical-replay-report.v1",
                 "moheng.historical-replay-report.v2",
+                "moheng.historical-replay-report.v3",
             }
             and v4_contract_valid
+            and v5_contract_valid
             and value.get("promotable") is False
             and value.get("shadowDaysCredited") == 0
             and value.get("decision") == "research_only"
@@ -415,6 +461,20 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
             ),
             "episodeCount": _integer(protocol_value.get("episodeCount")),
             "episodes": episodes,
+            "executionSlice": {
+                "developmentGatePassed": execution_slice_value.get(
+                    "developmentGatePassed"
+                )
+                is True,
+                "failures": execution_slice_failures_value,
+                "instrument": execution_slice_value.get("instrument"),
+                "maxDrawdown": execution_slice_ordinary_value.get("maxDrawdown"),
+                "netReturn": execution_slice_ordinary_value.get("netReturn"),
+                "stressNetReturn": execution_slice_stress_value.get("netReturn"),
+                "trades": _integer(execution_slice_ordinary_value.get("trades")),
+            }
+            if execution_slice_value
+            else None,
             "family": model_value.get("family"),
             "finalCash": ordinary_value.get("finalCash"),
             "firstReplayAt": dataset_value.get("firstReplayAt"),

@@ -60,7 +60,7 @@ from okx_demo_lab.ml.walk_forward import (
 )
 
 
-REPLAY_REPORT_SCHEMA_VERSION = "moheng.historical-replay-report.v2"
+REPLAY_REPORT_SCHEMA_VERSION = "moheng.historical-replay-report.v3"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESEARCH_DATA_ROOT = PROJECT_ROOT / ".research-data"
 TRAIN_BARS = 365 * 24 * 12
@@ -261,6 +261,21 @@ def _stress_failures(result: dict[str, Any]) -> list[str]:
     return failures
 
 
+def _execution_slice_failures(
+    ordinary: dict[str, Any], stress: dict[str, Any]
+) -> list[str]:
+    failures: list[str] = []
+    if len(ordinary["trades"]) < 20:
+        failures.append("execution_slice_trades_insufficient")
+    if float(ordinary["netReturn"]) <= 0.0:
+        failures.append("execution_slice_net_return_not_positive")
+    if float(stress["netReturn"]) <= 0.0:
+        failures.append("execution_slice_stress_return_not_positive")
+    if float(ordinary["maxDrawdown"]) > 0.10:
+        failures.append("execution_slice_drawdown_above_gate")
+    return failures
+
+
 def _summary(result: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
@@ -315,6 +330,39 @@ def _evaluate_policies(
         broker=STRESS_BROKER,
     )
     stress_failures = _stress_failures(stress)
+    try:
+        execution_index = tuple(instruments).index("BTC-USDT")
+    except ValueError as exc:
+        raise ReplayResearchError("BTC-USDT is absent from the research cohort") from exc
+    execution_candles = np.ascontiguousarray(
+        candles[:, execution_index : execution_index + 1, :]
+    )
+    execution_expected = np.ascontiguousarray(
+        expected_returns[:, execution_index : execution_index + 1]
+    )
+    execution_ordinary = run_historical_replay(
+        ("BTC-USDT",),
+        timestamps_ms,
+        execution_candles,
+        execution_expected,
+        episode_indices,
+        bindings,
+        policy=chosen_policy,
+        broker=STANDARD_BROKER,
+    )
+    execution_stress = run_historical_replay(
+        ("BTC-USDT",),
+        timestamps_ms,
+        execution_candles,
+        execution_expected,
+        episode_indices,
+        bindings,
+        policy=chosen_policy,
+        broker=STRESS_BROKER,
+    )
+    execution_failures = _execution_slice_failures(
+        execution_ordinary, execution_stress
+    )
     return {
         "chosenPolicy": chosen_policy.to_dict(STANDARD_BROKER),
         "decision": "research_only",
@@ -329,6 +377,14 @@ def _evaluate_policies(
             **ordinary,
             "developmentGatePassed": not ordinary_failures,
             "failures": ordinary_failures,
+        },
+        "executionSlice": {
+            "decision": "research_only",
+            "developmentGatePassed": not execution_failures,
+            "failures": execution_failures,
+            "instrument": "BTC-USDT",
+            "ordinary": _summary(execution_ordinary),
+            "stress48Bps": _summary(execution_stress),
         },
         "policySensitivity": policy_sensitivity,
         "promotionBlockers": list(PROMOTION_BLOCKERS),
@@ -684,7 +740,7 @@ def _write_report(path: Path, report: dict[str, Any]) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the research-only V4 execution-aligned market replay."
+        description="Run the research-only V5 execution-readiness market replay."
     )
     parser.add_argument("--cohort", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

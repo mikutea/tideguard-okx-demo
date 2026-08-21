@@ -67,6 +67,7 @@ def verify_report(report: dict[str, Any]) -> dict[str, Any]:
         in {
             "moheng.historical-replay-report.v1",
             "moheng.historical-replay-report.v2",
+            "moheng.historical-replay-report.v3",
         }
         and report.get("decision") == "research_only"
         and report.get("promotable") is False
@@ -111,7 +112,10 @@ def verify_report(report: dict[str, Any]) -> dict[str, Any]:
         and protocol.get("scope") == "retrospective-development-only",
         "rolling replay protocol is invalid",
     )
-    if schema_version == "moheng.historical-replay-report.v2":
+    if schema_version in {
+        "moheng.historical-replay-report.v2",
+        "moheng.historical-replay-report.v3",
+    }:
         model = report.get("model")
         _require(isinstance(model, dict), "model contract is invalid")
         target = model.get("targetContract")
@@ -199,7 +203,10 @@ def verify_report(report: dict[str, Any]) -> dict[str, Any]:
         and leakage.get("sameBarFillAllowed") is False,
         "broker cost or leakage contract failed",
     )
-    if schema_version == "moheng.historical-replay-report.v2":
+    if schema_version in {
+        "moheng.historical-replay-report.v2",
+        "moheng.historical-replay-report.v3",
+    }:
         _require(
             ordinary_broker.get("capacityHandling") == "clip"
             and ordinary_broker.get("executionLabelHorizonBars") == 13
@@ -207,6 +214,36 @@ def verify_report(report: dict[str, Any]) -> dict[str, Any]:
             and execution.get("engineSchemaVersion")
             == "moheng.historical-replay.v2",
             "V4 capacity or engine contract failed",
+        )
+    if schema_version == "moheng.historical-replay-report.v3":
+        execution_slice = result.get("executionSlice")
+        _require(isinstance(execution_slice, dict), "BTC execution slice is missing")
+        slice_ordinary = execution_slice.get("ordinary")
+        slice_stress = execution_slice.get("stress48Bps")
+        slice_failures = execution_slice.get("failures")
+        _require(
+            execution_slice.get("instrument") == "BTC-USDT"
+            and execution_slice.get("decision") == "research_only"
+            and isinstance(slice_ordinary, dict)
+            and isinstance(slice_stress, dict)
+            and isinstance(slice_failures, list)
+            and all(isinstance(item, str) for item in slice_failures)
+            and execution_slice.get("developmentGatePassed")
+            is (len(slice_failures) == 0),
+            "BTC execution slice contract failed",
+        )
+        slice_ordinary_broker = slice_ordinary.get("broker")
+        slice_stress_broker = slice_stress.get("broker")
+        _require(
+            isinstance(slice_ordinary_broker, dict)
+            and slice_ordinary_broker.get("roundTripCostBps") == 24.0
+            and isinstance(slice_stress_broker, dict)
+            and slice_stress_broker.get("roundTripCostBps") == 48.0
+            and isinstance(slice_ordinary.get("trades"), int)
+            and not isinstance(slice_ordinary.get("trades"), bool)
+            and isinstance(slice_stress.get("trades"), int)
+            and not isinstance(slice_stress.get("trades"), bool),
+            "BTC execution slice ledger is invalid",
         )
     starting_cash = _number(ordinary_broker.get("startingCash"), "startingCash")
     final_cash = _number(ordinary.get("finalCash"), "finalCash")

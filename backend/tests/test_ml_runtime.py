@@ -129,7 +129,7 @@ def test_ml_status_route_and_training_bounds(tmp_path, monkeypatch) -> None:
         assert autonomy.json()["activePosition"] is None
         review = client.get("/api/v1/autonomy/review-pack")
         assert review.status_code == 200
-        assert review.json()["schemaVersion"] == "tideguard.codex-review.v1"
+        assert review.json()["schemaVersion"] == "tideguard.codex-review.v2"
         enable = client.post(
             "/api/v1/autonomy/master/enable",
             headers={"X-Tideguard-CSRF": csrf},

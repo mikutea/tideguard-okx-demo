@@ -1,4 +1,4 @@
-import { BrainCircuit, CheckCircle2, CircleDashed, FileSearch, ShieldCheck, Sparkles } from "lucide-react";
+import { AlertOctagon, BrainCircuit, Check, CheckCircle2, CircleDashed, FileSearch, ShieldCheck, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 import { FailureSummary, ModelLineage } from "../components/Charts";
 import { EvidenceDrawer, PageHeader, StatusMark } from "../components/Primitives";
@@ -36,6 +36,15 @@ export function ModelsPage({ ml, explanationMode }: { ml: MLStatus | null; expla
       ? "相同 cohort 的旧 champion"
       : "在新 cohort 重训的 champion 配方 baseline"
     : "未建立 paired baseline";
+  const liveReadiness = ml?.longRun.review.liveReadiness;
+  const liveChampion = models.find((model) => model.modelId === liveReadiness?.modelId);
+  const liveSteps = liveReadiness ? [
+    { label: "Champion", passed: Boolean(liveChampion) },
+    { label: `Shadow ${liveReadiness.policy.minimumProspectiveShadowDays} 天`, passed: (liveChampion?.shadow.durationDays ?? 0) >= liveReadiness.policy.minimumProspectiveShadowDays },
+    { label: `Shadow ${liveReadiness.policy.minimumProspectiveShadowBuys} 笔`, passed: (liveChampion?.shadow.settledBuys ?? 0) >= liveReadiness.policy.minimumProspectiveShadowBuys },
+    { label: `Demo ${liveReadiness.policy.minimumDemoClosedPositions} 笔`, passed: (ml?.longRun.demoPerformance.closedPositions ?? 0) >= liveReadiness.policy.minimumDemoClosedPositions },
+    { label: "LIVE 自动执行", passed: liveReadiness.automatedLiveExecutionEnabled },
+  ] : [];
   return <div className="page-stack models-page">
     <PageHeader title="模型评估" description="用同口径成本、时间隔离与未来 Shadow 比较候选；准确率不等于可执行收益。" meta={<><StatusMark tone={ml?.longRun.champion ? "healthy" : "warning"}>{ml?.longRun.champion ? "Champion 有效" : "无 Champion"}</StatusMark><span>代次 {ml?.longRun.review.generation ?? 0}</span></>} />
     <div className="model-summary-grid">
@@ -59,6 +68,13 @@ export function ModelsPage({ ml, explanationMode }: { ml: MLStatus | null; expla
         {comparison.excluded > 0 ? <div className="comparison-caveat">{comparison.excluded} 个不同快照或协议的原始净收益未直接排名；跨 cohort 只使用后端 paired baseline</div> : null}
       </section>
     </div>
+    {liveReadiness ? <section className="workspace-panel" aria-labelledby="live-readiness-title">
+      <div className="panel-heading"><div><h2 id="live-readiness-title">从研究到实际资金的证据链</h2><p>每一格都必须来自同一冻结策略；历史回放不能替代前瞻观察。</p></div><StatusMark tone="danger"><AlertOctagon size={15} />LIVE AI 禁用</StatusMark></div>
+      <div className="readiness-rail" role="img" aria-label="Champion、90天Shadow、100笔Shadow、30笔Demo和Live自动执行的顺序门">
+        {liveSteps.map((step) => <div className={step.passed ? "passed" : "waiting"} key={step.label}><span>{step.passed ? <Check size={15} /> : <CircleDashed size={15} />}</span><strong>{step.label}</strong></div>)}
+      </div>
+      <div className="comparison-caveat">证据门：{liveReadiness.evidenceGatePassed ? "已通过" : `${liveReadiness.evidenceFailures.length} 项未通过`}；部署门固定阻塞为 LIVE AI 自动执行尚未实现与授权。即使证据转正，本版本也不会自动投入实际资金。</div>
+    </section> : null}
     <ModelLineage longRun={ml?.longRun ?? null} />
     <section className="workspace-panel model-ledger" aria-labelledby="model-ledger-title">
       <div className="panel-heading"><div><h2 id="model-ledger-title">候选模型账本</h2><p>{explanationMode === "summary" ? "先看可执行结论；技术证据点开查看" : "显示模型 ID、指标、Shadow 与门槛状态"}</p></div><span>{models.length} 个候选</span></div>

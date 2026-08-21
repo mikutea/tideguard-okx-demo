@@ -181,7 +181,7 @@ def _validated_inputs(
     episode_values = np.asarray(episode_indices)
     time_rows = int(timestamps.size)
     if (
-        not 3 <= len(names) <= 8
+        not 1 <= len(names) <= 8
         or len(names) != len(set(names))
         or any(not name.endswith("-USDT") for name in names)
         or timestamps.dtype != np.int64

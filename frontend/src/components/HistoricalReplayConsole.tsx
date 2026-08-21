@@ -20,6 +20,13 @@ const SPEEDS = [
   { delay: 42, label: "32×" },
 ] as const;
 
+const executionSliceFailureLabels: Record<string, string> = {
+  execution_slice_trades_insufficient: "BTC 闭环样本少于 20 笔",
+  execution_slice_net_return_not_positive: "BTC 常规成本净收益未转正",
+  execution_slice_stress_return_not_positive: "BTC 压力成本净收益未转正",
+  execution_slice_drawdown_above_gate: "BTC 最大回撤超过 10%",
+};
+
 function pathFor(values: number[], width: number, height: number, min: number, max: number): string {
   if (values.length < 2) return "";
   const span = max - min || 1;
@@ -132,6 +139,7 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
     && activeEpisode.calibratedBrier !== undefined
     ? activeEpisode.rawBrier - activeEpisode.calibratedBrier
     : null;
+  const executionSlice = replay.executionSlice;
 
   const selectEpisode = (startAt: string | null) => {
     if (!startAt) return;
@@ -143,17 +151,17 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
 
   return <section className="workspace-panel replay-console" aria-labelledby="replay-title">
     <div className="replay-titlebar">
-      <div className="replay-title-copy"><span className="replay-kicker"><BrainCircuit size={15} />CAUSAL REPLAY LAB · V4</span><h2 id="replay-title">执行对齐历史回放训练场</h2><p>365 天滚动训练、末 30 天隔离校准；标签严格对应下一根开盘成交与 12 根后退出。播放器只读取冻结证据，不触发训练、私有 API 或订单。</p></div>
+      <div className="replay-title-copy"><span className="replay-kicker"><BrainCircuit size={15} />CAUSAL REPLAY LAB · {replay.schemaVersion?.endsWith(".v3") ? "V5" : "V4"}</span><h2 id="replay-title">执行对齐历史回放训练场</h2><p>365 天滚动训练、末 30 天隔离校准；标签严格对应下一根开盘成交与 12 根后退出。V5 额外隔离显示 BTC-USDT 可执行切片，播放器不触发训练、私有 API 或订单。</p></div>
       <div className="replay-safety-stamp" aria-label="历史回放安全边界"><ShieldCheck size={19} /><div><strong>研究隔离</strong><span>0 Shadow 天 · 0 下单能力</span></div></div>
     </div>
 
     <div className="replay-kpi-strip">
       <div><span>模拟跨度</span><strong>{formatNumber(replay.simulatedDays, 0)} 天</strong><small>{replayDate(replay.firstReplayAt)} — {replayDate(replay.lastReplayAt)}</small></div>
       <div><span>周期更迭</span><strong>{replay.episodeCount} 代</strong><small>每 {formatNumber(replay.retrainEveryDays, 0)} 天重训</small></div>
-      <div><span>历史开发净收益</span><strong className={finite(replay.netReturn) < 0 ? "negative" : "positive"}>{formatPercent(replay.netReturn)}</strong><small>{formatNumber(replay.ordinaryCostBps, 0)} bps 往返 · 非未来承诺</small></div>
-      <div><span>压力成本净收益</span><strong className={finite(replay.stressNetReturn) < 0 ? "negative" : "positive"}>{formatPercent(replay.stressNetReturn)}</strong><small>48 bps 往返</small></div>
-      <div><span>最大回撤</span><strong>{drawdownPercent(replay.maxDrawdown)}</strong><small>{replay.tradeCount} 笔闭环</small></div>
-      <div><span>物理压缩倍数</span><strong>{formatNumber(replay.compressionMultiple, 0)}×</strong><small>{formatNumber(replay.totalWallSeconds, 1)} 秒墙钟时间</small></div>
+      <div><span>多币组合历史收益</span><strong className={finite(replay.netReturn) < 0 ? "negative" : "positive"}>{formatPercent(replay.netReturn)}</strong><small>{formatNumber(replay.ordinaryCostBps, 0)} bps 往返 · 研究口径</small></div>
+      <div><span>BTC 可执行切片</span><strong className={finite(executionSlice?.netReturn) < 0 ? "negative" : "positive"}>{formatPercent(executionSlice?.netReturn)}</strong><small>{executionSlice ? `${executionSlice.trades} 笔 · 压力 ${formatPercent(executionSlice.stressNetReturn)}` : "等待 V5 证据"}</small></div>
+      <div><span>组合压力成本收益</span><strong className={finite(replay.stressNetReturn) < 0 ? "negative" : "positive"}>{formatPercent(replay.stressNetReturn)}</strong><small>48 bps 往返</small></div>
+      <div><span>组合最大回撤</span><strong>{drawdownPercent(replay.maxDrawdown)}</strong><small>{replay.tradeCount} 笔闭环 · 非未来承诺</small></div>
     </div>
 
     <div className="replay-workbench">
@@ -207,6 +215,7 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
           <div><dt>此刻回撤</dt><dd>{drawdownPercent(checkpoint?.drawdown)}</dd></div>
         </dl>
         <div className={`replay-gate ${replay.developmentGatePassed ? "passed" : "blocked"}`}><LockKeyhole size={18} /><div><strong>{replay.developmentGatePassed ? "历史开发门槛通过，仍不可晋级" : "历史开发门槛未通过"}</strong><span>{replay.selectionBiasWarning ? "本段历史已用于诊断，正收益可能偏乐观；" : ""}历史回放永远不累计 Shadow 天数，也不修改 BTC-USDT 执行白名单。</span></div></div>
+        {executionSlice ? <div className={`replay-gate ${executionSlice.developmentGatePassed ? "passed" : "blocked"}`}><LockKeyhole size={18} /><div><strong>{executionSlice.developmentGatePassed ? "BTC 可执行切片通过开发门" : "BTC 可执行切片仍未达门"}</strong><span>{executionSlice.developmentGatePassed ? "仍需前瞻 Shadow 与 Demo 闭环。" : executionSlice.failures.map((failure) => executionSliceFailureLabels[failure] ?? failure).join("；")}</span></div></div> : null}
       </aside>
     </div>
 

@@ -25,7 +25,7 @@ if (-not $CohortManifest) {
 }
 if (-not $Output) {
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
-    $Output = Join-Path $DataRoot "replays\historical-replay-v4-$stamp.json"
+    $Output = Join-Path $DataRoot "replays\historical-replay-v5-$stamp.json"
 }
 if (-not (Test-Path -LiteralPath $ResearchPython -PathType Leaf)) {
     throw "Research runtime is missing. Run scripts/setup-research.ps1 first."
@@ -54,4 +54,4 @@ try {
     $env:PYTHONPATH = $PreviousPythonPath
 }
 
-Write-Host "V4 execution-aligned historical replay evidence: $Output"
+Write-Host "V5 execution-readiness historical replay evidence: $Output"
