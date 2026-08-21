@@ -79,8 +79,16 @@ QuantStats 图表以一个 90 天折为一期，只用于浏览折间稳定性�
 .\scripts\run-multiasset-history.ps1 -StatusOnly
 .\scripts\run-public-signals.ps1 -Command status
 .\scripts\build-multiasset-cohort.ps1
+.\scripts\run-multiasset-benchmark.ps1 -MaxFolds 1 -Families hist_gradient_boosting
 ```
 
 完整历史同步需数小时，必须单写者串行运行。当前固定成员是今天按流动性规则
 发现的幸存者 cohort，因此历史结果只用于模型消融，`promotable=false`；完成
 至少 90 天前瞻公共 Shadow 前，不能据此扩展 Demo 或 Live 下单白名单。
+
+多资产 benchmark 只接受经过二次验证的内容寻址 cohort：运行前会重验清单、
+数组哈希、严格 5 分钟时间网格、OHLCV 领域规则和相关矩阵。训练/测试按时间
+滚动切分，训练标签与测试窗之间保留 label horizon + embargo；测试时每个时刻
+只允许一个现金现货 long/flat 仓位，并按预声明的 24 bps、48 bps 压力成本计费。
+即使探索门通过，报告仍固定为 `research_only` 和 `promotable=false`，不会注册
+champion、扩大交易白名单或发送订单。

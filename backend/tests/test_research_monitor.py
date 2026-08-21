@@ -133,3 +133,63 @@ def test_monitor_rejects_tampered_universe_hash(tmp_path) -> None:
 
     assert status["universe"]["valid"] is False
     assert "universe_integrity_unverified" in status["blockers"]
+
+
+def test_monitor_verifies_latest_cohort_manifest_and_oos_report(tmp_path) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    cohort_content: dict[str, object] = {
+        "instruments": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
+        "promotionBlockers": [
+            "fixed_current_survivor_cohort",
+            "requires_90_day_forward_public_shadow",
+            "static_cost_only",
+        ],
+        "rowCount": 100,
+        "schemaVersion": "moheng.multi-asset-cohort.v1",
+    }
+    cohort_sha = sha256_hex(canonical_json(cohort_content))
+    cohort_id = f"cohort_{cohort_sha[:24]}"
+    cohort_manifest = {
+        **cohort_content,
+        "cohortId": cohort_id,
+        "contentSha256": cohort_sha,
+        "createdAt": "2026-08-21T13:00:00.000Z",
+        "promotable": False,
+    }
+    _write_json(
+        root / "cohorts" / cohort_id / "manifest.json", cohort_manifest
+    )
+    benchmark_body: dict[str, object] = {
+        "benchmarkId": "mabench_test",
+        "completedAt": "2026-08-21T14:00:00.000Z",
+        "dataset": {"cohortId": cohort_id},
+        "promotable": False,
+        "results": [
+            {
+                "chosenThreshold": 0.56,
+                "exploratoryGatePassed": True,
+                "family": "hist_gradient_boosting",
+                "ordinary": {
+                    "maxDrawdown": 0.02,
+                    "netReturn": 0.03,
+                    "trades": 42,
+                },
+            }
+        ],
+        "schemaVersion": "moheng.multi-asset-research.v1",
+    }
+    benchmark = {
+        **benchmark_body,
+        "reportSha256": sha256_hex(canonical_json(benchmark_body)),
+    }
+    _write_json(root / "benchmarks" / "multi-asset-test.json", benchmark)
+
+    status = ResearchMonitor(root).status()
+
+    assert status["cohort"]["manifestValid"] is True
+    assert status["cohort"]["blockers"] == cohort_content["promotionBlockers"]
+    assert status["benchmark"]["valid"] is True
+    assert status["benchmark"]["exploratoryGatePassed"] is True
+    assert status["benchmark"]["results"][0]["trades"] == 42
+    assert "multi_asset_oos_not_run" not in status["blockers"]

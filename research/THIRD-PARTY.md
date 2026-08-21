@@ -44,12 +44,16 @@ for trusted order-book research until patched and replay-tested.
 1. Source code and algorithm descriptions may be reviewed. Untrusted `.pkl`,
    `.joblib`, `.pt`, `.onnx`, binary strategy plug-ins, and copied API
    credentials are rejected.
-2. Every challenger is retrained locally on the same immutable BTC-USDT 5m
-   snapshot. Every fold trains on its past 365 days and evaluates the next 90
-   days after a 12-bar label purge and 1-bar embargo.
-3. Capital is cash-SPOT long/flat and non-overlapping. A SELL signal never
-   earns synthetic short profit. Ordinary evaluation charges 24 bps per round
-   trip and stress evaluation charges 48 bps.
+2. Single-asset challengers are retrained locally on the same immutable
+   BTC-USDT 5m snapshot. Multi-asset challengers use one content-addressed,
+   strictly intersected 5m cohort with no forward-fill. The initial cohort is
+   a fixed-current survivor cohort and therefore can never be promoted.
+   Every fold trains on its past 365 days and evaluates the next 90 days after
+   a 12-bar label purge and 1-bar embargo.
+3. Multi-asset capital is one cash-SPOT long/flat position and selects only the
+   highest score at each non-overlapping entry. A SELL signal never earns
+   synthetic short profit. Ordinary evaluation charges 24 bps per round trip
+   and stress evaluation charges 48 bps.
 4. Thresholds 0.52, 0.56, and 0.60 are declared before the run. The threshold
    is selected only on development folds; the final four folds remain sealed.
 5. Every family and every failure is reported. A model must pass development,

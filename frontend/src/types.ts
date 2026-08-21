@@ -295,8 +295,26 @@ export interface ResearchMonitorStatus {
     contentSha256: string | null;
     createdAt: string | null;
     instruments: string[];
+    manifestValid: boolean;
     promotable: boolean;
     rowCount: number;
+  };
+  benchmark: null | {
+    benchmarkId: string | null;
+    cohortId: string | null;
+    completedAt: string | null;
+    exploratoryGatePassed: boolean;
+    promotable: boolean;
+    reportSha256: string | null;
+    results: Array<{
+      chosenThreshold: number | null;
+      exploratoryGatePassed: boolean;
+      family: string | null;
+      maxDrawdown: number | null;
+      netReturn: number | null;
+      trades: number;
+    }>;
+    valid: boolean;
   };
   blockers: string[];
 }

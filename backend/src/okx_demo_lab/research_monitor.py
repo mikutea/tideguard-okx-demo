@@ -57,12 +57,24 @@ def _valid_hash(value: object) -> bool:
     )
 
 
+def _canonical_hash_matches(
+    value: Mapping[str, Any], stored_hash: object, *, excluded: set[str]
+) -> bool:
+    if not _valid_hash(stored_hash):
+        return False
+    body = {key: item for key, item in value.items() if key not in excluded}
+    try:
+        computed = sha256_hex(canonical_json(body))
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(str(stored_hash), computed)
+
+
 def _verified_universe(report: Mapping[str, Any]) -> bool:
     stored_report_hash = report.get("reportSha256")
-    if not _valid_hash(stored_report_hash):
-        return False
-    report_body = {key: value for key, value in report.items() if key != "reportSha256"}
-    if not hmac.compare_digest(str(stored_report_hash), sha256_hex(canonical_json(report_body))):
+    if not _canonical_hash_matches(
+        report, stored_report_hash, excluded={"reportSha256"}
+    ):
         return False
     snapshot = report.get("snapshot")
     if not isinstance(snapshot, dict):
@@ -70,9 +82,8 @@ def _verified_universe(report: Mapping[str, Any]) -> bool:
     stored_snapshot_hash = snapshot.get("sha256")
     if not _valid_hash(stored_snapshot_hash):
         return False
-    snapshot_body = {key: value for key, value in snapshot.items() if key != "sha256"}
-    return hmac.compare_digest(
-        str(stored_snapshot_hash), sha256_hex(canonical_json(snapshot_body))
+    return _canonical_hash_matches(
+        snapshot, stored_snapshot_hash, excluded={"sha256"}
     )
 
 
@@ -126,14 +137,82 @@ def _latest_cohort(root: Path) -> dict[str, Any] | None:
         value = _read_json(path)
         if value is None:
             continue
+        content_hash = value.get("contentSha256")
+        manifest_valid = bool(
+            _canonical_hash_matches(
+                value,
+                content_hash,
+                excluded={"cohortId", "contentSha256", "createdAt", "promotable"},
+            )
+            and value.get("cohortId") == f"cohort_{str(content_hash)[:24]}"
+            and path.parent.name == value.get("cohortId")
+            and value.get("promotable") is False
+        )
         return {
-            "blockers": value.get("blockers") if isinstance(value.get("blockers"), list) else [],
+            "blockers": value.get("promotionBlockers") if isinstance(value.get("promotionBlockers"), list) else [],
             "cohortId": value.get("cohortId"),
-            "contentSha256": value.get("contentSha256"),
+            "contentSha256": content_hash,
             "createdAt": value.get("createdAt"),
             "instruments": value.get("instruments") if isinstance(value.get("instruments"), list) else [],
+            "manifestValid": manifest_valid,
             "promotable": value.get("promotable") is True,
             "rowCount": _integer(value.get("rowCount")),
+        }
+    return None
+
+
+def _latest_benchmark(root: Path) -> dict[str, Any] | None:
+    benchmark_root = root / "benchmarks"
+    if not benchmark_root.is_dir():
+        return None
+    candidates: list[tuple[int, Path]] = []
+    for path in benchmark_root.glob("multi-asset-*.json"):
+        try:
+            candidates.append((path.stat().st_mtime_ns, path))
+        except OSError:
+            continue
+    for _, path in sorted(candidates, reverse=True)[:100]:
+        value = _read_json(path)
+        if value is None:
+            continue
+        report_hash = value.get("reportSha256")
+        valid = bool(
+            _canonical_hash_matches(
+                value, report_hash, excluded={"reportSha256"}
+            )
+            and value.get("promotable") is False
+        )
+        dataset = value.get("dataset")
+        dataset_value = dataset if isinstance(dataset, dict) else {}
+        results_value = value.get("results")
+        results = results_value if isinstance(results_value, list) else []
+        summaries = []
+        for item in results[:20]:
+            if not isinstance(item, dict):
+                continue
+            ordinary = item.get("ordinary")
+            ordinary_value = ordinary if isinstance(ordinary, dict) else {}
+            summaries.append(
+                {
+                    "chosenThreshold": item.get("chosenThreshold"),
+                    "exploratoryGatePassed": item.get("exploratoryGatePassed") is True,
+                    "family": item.get("family"),
+                    "maxDrawdown": ordinary_value.get("maxDrawdown"),
+                    "netReturn": ordinary_value.get("netReturn"),
+                    "trades": _integer(ordinary_value.get("trades")),
+                }
+            )
+        return {
+            "benchmarkId": value.get("benchmarkId"),
+            "cohortId": dataset_value.get("cohortId"),
+            "completedAt": value.get("completedAt"),
+            "exploratoryGatePassed": any(
+                item["exploratoryGatePassed"] for item in summaries
+            ),
+            "promotable": value.get("promotable") is True,
+            "reportSha256": report_hash,
+            "results": summaries,
+            "valid": valid,
         }
     return None
 
@@ -161,6 +240,7 @@ class ResearchMonitor:
             return {
                 **base,
                 "blockers": ["research_data_not_configured"],
+                "benchmark": None,
                 "cohort": None,
                 "history": None,
                 "signals": {"available": False},
@@ -229,12 +309,22 @@ class ResearchMonitor:
         cohort = _latest_cohort(root)
         if cohort is None:
             blockers.append("aligned_cohort_not_built")
+        elif not cohort["manifestValid"]:
+            blockers.append("cohort_manifest_integrity_unverified")
+        benchmark = _latest_benchmark(root)
+        if benchmark is None:
+            blockers.append("multi_asset_oos_not_run")
+        elif not benchmark["valid"]:
+            blockers.append("benchmark_integrity_unverified")
+        elif not benchmark["exploratoryGatePassed"]:
+            blockers.append("multi_asset_oos_gate_failed")
         blockers.extend(
             ["requires_90_day_forward_public_shadow", "static_cost_only"]
         )
         return {
             **base,
             "available": True,
+            "benchmark": benchmark,
             "blockers": list(dict.fromkeys(blockers)),
             "cohort": cohort,
             "history": history,

@@ -9,7 +9,7 @@ import {
   Newspaper,
   ShieldCheck
 } from "lucide-react";
-import { formatTime, shortId } from "../lib/format";
+import { formatPercent, formatTime, shortId } from "../lib/format";
 import type { ResearchMonitorStatus } from "../types";
 import { StatusMark } from "./Primitives";
 
@@ -39,6 +39,10 @@ const blockerLabels: Record<string, string> = {
   unresolved_history_gaps: "历史时间网格仍有缺口",
   immutable_data_conflicts: "不可变行情存在冲突",
   aligned_cohort_not_built: "严格对齐 cohort 尚未生成",
+  cohort_manifest_integrity_unverified: "cohort 清单哈希尚未通过",
+  multi_asset_oos_not_run: "多资产样本外评估尚未运行",
+  benchmark_integrity_unverified: "样本外报告哈希尚未通过",
+  multi_asset_oos_gate_failed: "多资产探索门未通过（仍保留研究证据）",
   requires_90_day_forward_public_shadow: "需完成至少 90 天前瞻公共 Shadow",
   static_cost_only: "当前仅采用静态保守成本，尚未完成成交冲击校准"
 };
@@ -73,6 +77,18 @@ export function ResearchObservatory({ status }: { status: ResearchMonitorStatus 
   const instruments = history?.instruments ?? [];
   const completeAssets = instruments.filter((item) => item.backfillComplete).length;
   const active = Boolean(history?.active);
+  const benchmark = status?.benchmark;
+  const bestBenchmark = [...(benchmark?.results ?? [])].sort(
+    (left, right) => (right.netReturn ?? Number.NEGATIVE_INFINITY) - (left.netReturn ?? Number.NEGATIVE_INFINITY)
+  )[0];
+  const readinessSteps = [
+    { label: "宇宙哈希", done: Boolean(universe?.valid) },
+    { label: "完整历史", done: instruments.length > 0 && completeAssets === instruments.length },
+    { label: "严格对齐", done: Boolean(status?.cohort?.manifestValid) },
+    { label: "模型 OOS", done: Boolean(benchmark?.valid) },
+    { label: "90 天 Shadow", done: false }
+  ];
+  const activeReadinessStep = readinessSteps.findIndex((step) => !step.done);
   return <>
     <section className="workspace-panel research-observatory" aria-labelledby="research-observatory-title">
       <div className="panel-heading">
@@ -109,13 +125,7 @@ export function ResearchObservatory({ status }: { status: ResearchMonitorStatus 
       <section className="workspace-panel research-readiness" aria-labelledby="research-readiness-title">
         <div className="panel-heading"><div><h2 id="research-readiness-title">训练准入门</h2><p>完成历史训练不等于可晋级，更不等于可投入实际资金</p></div><FileWarning size={20} /></div>
         <div className="readiness-flow" role="img" aria-label="研究宇宙、全历史、对齐 cohort、模型样本外评估、90 天前瞻影子验证的顺序门">
-          {[
-            { label: "宇宙哈希", done: Boolean(universe?.valid) },
-            { label: "完整历史", done: instruments.length > 0 && completeAssets === instruments.length },
-            { label: "严格对齐", done: Boolean(status?.cohort) },
-            { label: "模型 OOS", done: false },
-            { label: "90 天 Shadow", done: false }
-          ].map((step, index) => <div className={step.done ? "done" : index === (universe?.valid ? 1 : 0) ? "active" : "locked"} key={step.label}><span>{step.done ? <Check size={15} /> : index + 1}</span><strong>{step.label}</strong></div>)}
+          {readinessSteps.map((step, index) => <div className={step.done ? "done" : index === activeReadinessStep ? "active" : "locked"} key={step.label}><span>{step.done ? <Check size={15} /> : index + 1}</span><strong>{step.label}</strong></div>)}
         </div>
         <ul className="research-blockers">
           {(status?.blockers ?? ["research_data_not_configured"]).map((blocker) => <li key={blocker}><LockKeyhole size={15} /><span>{blockerLabels[blocker] ?? blocker}</span></li>)}
@@ -129,6 +139,9 @@ export function ResearchObservatory({ status }: { status: ResearchMonitorStatus 
           <div><dt>文章正文</dt><dd>{status?.signals.fullTextStored ? "已保存" : "不保存"}</dd></div>
           <div><dt>信号数据库</dt><dd>{status?.signals.available ? bytes(status.signals.databaseBytes) : "尚未采集"}</dd></div>
           <div><dt>对齐 cohort</dt><dd>{status?.cohort ? shortId(status.cohort.cohortId, 16) : "等待完整历史"}</dd></div>
+          <div><dt>多资产 OOS</dt><dd>{benchmark?.valid ? shortId(benchmark.benchmarkId, 16) : "等待严格 cohort"}</dd></div>
+          <div><dt>已评估模型</dt><dd>{benchmark?.results.length ?? 0} 个固定家族</dd></div>
+          <div><dt>探索最优</dt><dd>{bestBenchmark ? `${bestBenchmark.family ?? "unknown"} · ${formatPercent(bestBenchmark.netReturn, 1)}` : "尚无结果"}</dd></div>
           <div><dt>可晋级</dt><dd><StatusMark tone="warning">否 · 前瞻证据不足</StatusMark></dd></div>
         </dl>
       </section>
