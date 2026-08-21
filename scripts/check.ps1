@@ -11,9 +11,17 @@ function Assert-NativeSuccess([string]$Step) {
     }
 }
 
-$pytestTemp = Join-Path ([System.IO.Path]::GetTempPath()) ('tideguard-pytest-' + [guid]::NewGuid().ToString('N'))
-& $pythonPath -m pytest (Join-Path $projectRoot 'backend\tests') --basetemp $pytestTemp -q
-Assert-NativeSuccess '后端测试'
+$pytestRoot = Join-Path $projectRoot '.pytest-work'
+$pytestTemp = Join-Path $pytestRoot ('tideguard-pytest-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $pytestTemp -Force | Out-Null
+try {
+    & $pythonPath -m pytest (Join-Path $projectRoot 'backend\tests') --basetemp $pytestTemp -q
+    Assert-NativeSuccess '后端测试'
+} finally {
+    if (Test-Path -LiteralPath $pytestTemp) {
+        Remove-Item -LiteralPath $pytestTemp -Recurse -Force
+    }
+}
 & $pythonPath -m compileall -q (Join-Path $projectRoot 'backend\src') (Join-Path $projectRoot 'desktop')
 Assert-NativeSuccess 'Python 编译检查'
 & $pythonPath -m unittest discover -s (Join-Path $projectRoot 'desktop\tests') -v

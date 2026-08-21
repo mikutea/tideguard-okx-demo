@@ -27,7 +27,7 @@ instruments and tickers and selected six provisional members:
 The frozen discovery-policy SHA-256 is
 `d45eead71795deae02c3c425b851dbde0705d6d10b05648de95cee84f4206ff2`.
 Each run's market snapshot and report hash change with public prices and time;
-the generated JSON remains under ignored `research/results/`.
+the generated JSON remains under ignored project-local `.research-data/`.
 
 This is not a portfolio recommendation. A single 24-hour volume snapshot is
 volatile and can be manipulated. Each candidate still needs:
@@ -44,6 +44,19 @@ PEPE is therefore a provisional research row, not an endorsement. A
 correlation/concentration gate may remove it or any other member.
 
 ## Shared-capital portfolio protocol
+
+Phase 2 stores each confirmed 5m series in
+`.research-data/multi-asset-market.sqlite3`. Because the workspace is an SMB
+mapped drive, the store uses rollback journaling, FULL synchronous writes and
+a strict single writer; WAL is explicitly forbidden. History origin requires
+two separately hashed empty-page probes at least 60 seconds apart. A snapshot
+is usable only when the series is complete, gap-free, conflict-free and exactly
+current.
+
+The aligned cohort builder writes content-addressed NumPy arrays beneath
+`.research-data/cohorts/`. It uses only the strict intersection of all member
+timestamps, never forward-fills, binds every source snapshot hash, and verifies
+array size, dtype, shape and SHA-256 before reusing an existing cohort.
 
 Adding independent single-asset equity curves is invalid because each curve
 reuses the same capital. `ml/portfolio.py` introduces a conservative research

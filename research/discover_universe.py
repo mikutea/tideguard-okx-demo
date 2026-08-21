@@ -13,6 +13,22 @@ from okx_demo_lab.ml.universe import UniversePolicy, select_research_universe
 from okx_demo_lab.public_market import OkxPublicMarketClient, PublicMarketError
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OUTPUT = PROJECT_ROOT / ".research-data" / "universes" / "universe-latest.json"
+
+
+def _project_output(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    data_root = (PROJECT_ROOT / ".research-data").resolve()
+    try:
+        resolved.relative_to(data_root)
+    except ValueError as exc:
+        raise ValueError(
+            "universe output must stay under project .research-data"
+        ) from exc
+    return resolved
+
+
 def _write_atomic(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -53,12 +69,13 @@ def main() -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("research/results/universe-latest.json"),
+        default=DEFAULT_OUTPUT,
     )
     args = parser.parse_args()
     try:
-        report = asyncio.run(discover(args.output))
-    except PublicMarketError as exc:
+        output = _project_output(args.output)
+        report = asyncio.run(discover(output))
+    except (PublicMarketError, ValueError) as exc:
         print(json.dumps({"errorType": type(exc).__name__, "message": str(exc)}))
         return 2
     print(
@@ -68,7 +85,7 @@ def main() -> int:
                     item["instrument"]
                     for item in report["snapshot"]["members"]  # type: ignore[index]
                 ],
-                "output": str(args.output.resolve()),
+                "output": str(output),
                 "reportSha256": report["reportSha256"],
             },
             ensure_ascii=False,

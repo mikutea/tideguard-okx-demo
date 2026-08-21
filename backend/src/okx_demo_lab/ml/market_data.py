@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..okx_client import OkxClient
+from ..sqlite_runtime import configure_sqlite_connection
 from .pipeline import BAR_MILLISECONDS
 from .strategy import canonical_json, sha256_hex
 
@@ -214,9 +215,7 @@ class MarketDataStore:
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA foreign_keys=ON")
-        db.execute("PRAGMA busy_timeout=10000")
+        configure_sqlite_connection(db, self.path)
         return db
 
     @contextmanager

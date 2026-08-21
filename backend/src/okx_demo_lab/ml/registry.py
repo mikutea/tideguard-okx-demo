@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from ..sqlite_runtime import configure_sqlite_connection
+
 from .strategy import (
     MODEL_SCHEMA_VERSION,
     FrozenModelBundle,
@@ -149,8 +151,7 @@ class ModelRegistry:
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA foreign_keys=ON")
+        configure_sqlite_connection(db, self.path)
         return db
 
     @contextmanager

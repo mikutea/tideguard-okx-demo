@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .sqlite_runtime import configure_sqlite_connection
+
 
 SENSITIVE_FRAGMENTS = ("secret", "passphrase", "api_key", "apikey", "signature", "authorization")
 ENVIRONMENT_SWITCH_BLOCKING_INTENT_STATES = frozenset(
@@ -61,8 +63,7 @@ class AuditStore:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
+        configure_sqlite_connection(connection, self.path)
         return connection
 
     @contextmanager

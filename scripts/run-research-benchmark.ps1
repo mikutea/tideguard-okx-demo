@@ -3,17 +3,20 @@ param(
     [string]$Families = "hist_gradient_boosting,extra_trees,mlp,lightgbm,xgboost,catboost",
     [Nullable[int]]$MaxFolds = $null,
     [string]$Output = "",
-    [string]$RuntimeRoot = (Join-Path $env:LOCALAPPDATA "Tideguard\research-runtime")
+    [string]$RuntimeRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+if (-not $RuntimeRoot) {
+    $RuntimeRoot = Join-Path $ProjectRoot ".research-data\runtime"
+}
 $ResearchPython = Join-Path $RuntimeRoot "venv\Scripts\python.exe"
 $Benchmark = Join-Path $ProjectRoot "research\model_benchmark.py"
-$DataPath = Join-Path $env:LOCALAPPDATA "Tideguard\market-data.sqlite3"
+$DataPath = Join-Path $ProjectRoot ".research-data\btc-market-data.sqlite3"
 if (-not $Output) {
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
-    $Output = Join-Path $ProjectRoot "research\results\benchmark-$stamp.json"
+    $Output = Join-Path $ProjectRoot ".research-data\benchmarks\benchmark-$stamp.json"
 }
 
 if (-not (Test-Path -LiteralPath $ResearchPython -PathType Leaf)) {

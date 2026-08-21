@@ -591,7 +591,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("research/results/latest-benchmark.json"),
+        default=Path(__file__).resolve().parents[1]
+        / ".research-data"
+        / "benchmarks"
+        / "latest-benchmark.json",
     )
     parser.add_argument(
         "--families",

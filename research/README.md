@@ -19,7 +19,7 @@ QuantStats 只做周期收益指标交叉验证；Cryptofeed 只用于未来 OKX
 WebSocket 数据采集。NautilusTrader、Qlib 与 FreqAI 通过后续 canonical JSON
 sidecar 协议对接，不进入墨衡凭证和执行进程。
 
-结果默认写入 `research/results/`，该目录不进入 Git。只有脱敏、可复核的汇总
+结果默认写入项目内 `.research-data/`，该目录不进入 Git。只有脱敏、可复核的汇总
 才允许进入 `docs/` 和模型监督证据链。
 
 ## Windows quick start
@@ -29,9 +29,9 @@ sidecar 协议对接，不进入墨衡凭证和执行进程。
 .\scripts\run-research-benchmark.ps1
 ```
 
-第一条命令会在 `%LOCALAPPDATA%\Tideguard\research-runtime` 创建隔离的
-Python 3.11 环境，不会把机器学习库打进桌面 EXE。第二条只读取共享的公共
-`market-data.sqlite3` 快照，并将证据写入已忽略的 `research/results/`；它不能
+第一条命令会在 `Y:\Projects\okx\.research-data\runtime` 创建隔离的
+Python 3.11 环境，不会把机器学习库打进桌面 EXE。第二条只读取项目内的公共
+`btc-market-data.sqlite3` 快照，并将证据写入已忽略的 `.research-data/benchmarks/`；它不能
 读取凭证或导入订单服务。
 
 源码、许可和准入清单见 `THIRD-PARTY.md`。
@@ -39,10 +39,10 @@ Python 3.11 环境，不会把机器学习库打进桌面 EXE。第二条只读�
 可选的人类可读诊断可由同一隔离环境生成：
 
 ```powershell
-& "$env:LOCALAPPDATA\Tideguard\research-runtime\venv\Scripts\python.exe" `
+& ".\.research-data\runtime\venv\Scripts\python.exe" `
   .\research\render_quantstats.py `
-  .\research\results\benchmark-full-v1.json `
-  .\research\results\quantstats
+  .\.research-data\benchmarks\benchmark-full-v1.json `
+  .\.research-data\benchmarks\quantstats
 ```
 
 QuantStats 图表以一个 90 天折为一期，只用于浏览折间稳定性；其比率不会替代
@@ -51,7 +51,7 @@ QuantStats 图表以一个 90 天折为一期，只用于浏览折间稳定性�
 ## Public multi-asset discovery
 
 ```powershell
-& "$env:LOCALAPPDATA\Tideguard\research-runtime\venv\Scripts\python.exe" `
+& ".\.research-data\runtime\venv\Scripts\python.exe" `
   .\research\discover_universe.py
 ```
 
@@ -63,9 +63,24 @@ QuantStats 图表以一个 90 天折为一期，只用于浏览折间稳定性�
 新闻/社媒的首个本地基线只使用 MIT 的 VADER，并冻结包版本与完整词典哈希：
 
 ```powershell
-& "$env:LOCALAPPDATA\Tideguard\research-runtime\venv\Scripts\python.exe" `
+& ".\.research-data\runtime\venv\Scripts\python.exe" `
   .\research\vader_adapter.py --self-test
 ```
 
 该适配器只接受已经通过来源许可和 point-in-time 检查的本地事件；它不下载
 文章、模型权重或社媒数据，输出也只能作为后续消融研究的数值弱信号。
+
+## Phase 2: multi-asset public research
+
+以下命令只使用公开数据，所有数据库、锁、进度和数组都留在项目内
+`.research-data/`。它们没有凭证提供器、私有 API 或订单能力：
+
+```powershell
+.\scripts\run-multiasset-history.ps1 -StatusOnly
+.\scripts\run-public-signals.ps1 -Command status
+.\scripts\build-multiasset-cohort.ps1
+```
+
+完整历史同步需数小时，必须单写者串行运行。当前固定成员是今天按流动性规则
+发现的幸存者 cohort，因此历史结果只用于模型消融，`promotable=false`；完成
+至少 90 天前瞻公共 Shadow 前，不能据此扩展 Demo 或 Live 下单白名单。

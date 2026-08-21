@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+import time
 
 from okx_demo_lab.public_market import OkxPublicMarketClient, PublicMarketError
 
@@ -49,3 +50,152 @@ async def test_public_research_client_rejects_non_allowlisted_paths_and_bad_enve
             await client._get("/api/v5/market/tickers", {"instType": "SPOT"})
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_public_history_pages_are_strictly_decreasing_and_accept_short_pages() -> None:
+    requests: list[str | None] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        after = request.url.params.get("after")
+        requests.append(after)
+        if len(requests) >= 3:
+            rows: list[list[str]] = []
+        else:
+            upper = 1_000 if after is None else int(after) - 1
+            rows = [
+                [str(upper), "1", "2", "0.5", "1.5", "10", "15", "15", "1"],
+                [str(upper - 1), "1", "2", "0.5", "1.5", "10", "15", "15", "1"],
+            ]
+        return httpx.Response(200, json={"code": "0", "msg": "", "data": rows})
+
+    client = OkxPublicMarketClient(
+        transport=httpx.MockTransport(handler),
+        history_page_delay_seconds=0,
+        history_instruments={"ETH-USDT"},
+    )
+    try:
+        pages = [
+            (page, cursor)
+            async for page, cursor in client.iter_history_candle_pages(
+                "ETH-USDT", page_limit=300
+            )
+        ]
+    finally:
+        await client.close()
+
+    assert [cursor for _page, cursor in pages] == [999, 997, 997]
+    assert [len(page) for page, _cursor in pages] == [2, 2, 0]
+    assert requests == [None, "999", "997", "997", "997"]
+
+
+@pytest.mark.asyncio
+async def test_public_history_retries_50011_and_rejects_stalled_cursor() -> None:
+    attempts = 0
+
+    async def retry_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(200, json={"code": "50011", "msg": "slow", "data": []})
+        return httpx.Response(
+            200,
+            json={"code": "0", "msg": "", "data": [["100", "1", "2", "0.5", "1.5", "1", "1", "1", "1"]]},
+        )
+
+    retry_client = OkxPublicMarketClient(
+        transport=httpx.MockTransport(retry_handler),
+        history_page_delay_seconds=0,
+        history_instruments={"ETH-USDT"},
+    )
+    try:
+        page, cursor = await anext(retry_client.iter_history_candle_pages("ETH-USDT"))
+    finally:
+        await retry_client.close()
+    assert attempts == 3
+    assert len(page) == 1 and cursor == 100
+
+    async def stalled_handler(request: httpx.Request) -> httpx.Response:
+        timestamp = request.url.params.get("after") or "100"
+        return httpx.Response(
+            200,
+            json={"code": "0", "msg": "", "data": [[timestamp, "1", "2", "0.5", "1.5", "1", "1", "1", "1"]]},
+        )
+
+    stalled = OkxPublicMarketClient(
+        transport=httpx.MockTransport(stalled_handler),
+        history_page_delay_seconds=0,
+        history_instruments={"ETH-USDT"},
+    )
+    try:
+        with pytest.raises(PublicMarketError, match="cursor"):
+            async for _page, _cursor in stalled.iter_history_candle_pages(
+                "ETH-USDT", after=100
+            ):
+                pass
+    finally:
+        await stalled.close()
+
+
+@pytest.mark.asyncio
+async def test_public_history_requires_frozen_universe_membership() -> None:
+    client = OkxPublicMarketClient(
+        transport=httpx.MockTransport(lambda _request: pytest.fail("network called")),
+        history_page_delay_seconds=0,
+        history_instruments={"ETH-USDT"},
+    )
+    try:
+        with pytest.raises(PublicMarketError, match="frozen research universe"):
+            await anext(client.iter_history_candle_pages("SOL-USDT"))
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_public_history_rejects_mixed_page_that_crosses_cursor() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        rows = [
+            ["99", "1", "2", "0.5", "1.5", "1", "1", "1", "1"],
+            ["101", "1", "2", "0.5", "1.5", "1", "1", "1", "1"],
+        ]
+        return httpx.Response(200, json={"code": "0", "msg": "", "data": rows})
+
+    client = OkxPublicMarketClient(
+        transport=httpx.MockTransport(handler),
+        history_page_delay_seconds=0,
+        history_instruments={"ETH-USDT"},
+    )
+    try:
+        with pytest.raises(PublicMarketError, match="crossed"):
+            await anext(
+                client.iter_history_candle_pages("ETH-USDT", after=100)
+            )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_public_history_rate_gate_is_shared_across_independent_iterators() -> None:
+    requested_at: list[float] = []
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        requested_at.append(time.monotonic())
+        row = ["100", "1", "2", "0.5", "1.5", "1", "1", "1", "1"]
+        return httpx.Response(200, json={"code": "0", "msg": "", "data": [row]})
+
+    client = OkxPublicMarketClient(
+        transport=httpx.MockTransport(handler),
+        history_page_delay_seconds=0.03,
+        history_instruments={"ETH-USDT"},
+    )
+    first = client.iter_history_candle_pages("ETH-USDT")
+    second = client.iter_history_candle_pages("ETH-USDT")
+    try:
+        await anext(first)
+        await anext(second)
+    finally:
+        await first.aclose()
+        await second.aclose()
+        await client.close()
+    assert len(requested_at) == 2
+    assert requested_at[1] - requested_at[0] >= 0.025
