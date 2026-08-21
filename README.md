@@ -111,6 +111,11 @@ shadow 或订单链。精确协议、指标与 canonical 报告哈希见
 [第三方模型基准](docs/THIRD-PARTY-BENCHMARK.md)，源码与许可边界见
 [研究准入清单](research/THIRD-PARTY.md)。
 
+多资产和新闻/社媒扩展遵循独立研究边界：公共 universe 发现不会扩大订单
+白名单；弱信号必须保留首次可见时间和许可快照，先做消融与前瞻 Shadow。
+设计、当前 6 个临时研究候选和来源拒绝清单见
+[多资产与替代数据边界](docs/MULTI-ASSET-ALTERNATIVE-DATA.md)。
+
 ## 验证与发行
 
 ```powershell

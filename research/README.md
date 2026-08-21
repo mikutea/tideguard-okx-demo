@@ -47,3 +47,25 @@ Python 3.11 环境，不会把机器学习库打进桌面 EXE。第二条只读�
 
 QuantStats 图表以一个 90 天折为一期，只用于浏览折间稳定性；其比率不会替代
 墨衡的逐交易 OOS、回撤、封存和双成本门槛。
+
+## Public multi-asset discovery
+
+```powershell
+& "$env:LOCALAPPDATA\Tideguard\research-runtime\venv\Scripts\python.exe" `
+  .\research\discover_universe.py
+```
+
+该命令只访问 OKX 公开 `SPOT instruments + tickers`，按 USDT、上线时间、
+成交额、点差、新鲜度、稳定币和杠杆代币排除规则生成内容寻址候选快照。
+它不会更改生产订单白名单；候选仍需逐资产完整历史、对齐 cohort、相关性和
+组合级 OOS 后才能进入 Demo shadow。
+
+新闻/社媒的首个本地基线只使用 MIT 的 VADER，并冻结包版本与完整词典哈希：
+
+```powershell
+& "$env:LOCALAPPDATA\Tideguard\research-runtime\venv\Scripts\python.exe" `
+  .\research\vader_adapter.py --self-test
+```
+
+该适配器只接受已经通过来源许可和 point-in-time 检查的本地事件；它不下载
+文章、模型权重或社媒数据，输出也只能作为后续消融研究的数值弱信号。

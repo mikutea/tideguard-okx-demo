@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "moheng.alternative-data-source-registry.v1",
+  "sources": [
+    {
+      "id": "official-rss-atom",
+      "status": "conditional-per-feed-approval",
+      "allowedUse": "prospective metadata and headline after terms snapshot",
+      "fullTextStorage": false
+    },
+    {
+      "id": "gdelt-2",
+      "status": "approved-metadata-with-attribution",
+      "allowedUse": "metadata, URLs, titles and source-derived fields",
+      "fullTextStorage": false
+    },
+    {
+      "id": "alternative-me-fear-greed",
+      "status": "approved-daily-control-with-attribution",
+      "allowedUse": "numeric regime control",
+      "fullTextStorage": false
+    },
+    {
+      "id": "fred-alfred",
+      "status": "approved-series-whitelist",
+      "allowedUse": "vintage-aware macro features with required notices",
+      "fullTextStorage": false
+    },
+    {
+      "id": "coinmetrics-community",
+      "status": "research-only-noncommercial",
+      "allowedUse": "local non-commercial on-chain research",
+      "fullTextStorage": false
+    },
+    {
+      "id": "newsapi-lunarcrush-stocktwits-google-trends",
+      "status": "blocked-pending-contract",
+      "allowedUse": "none until training and commercial rights are documented",
+      "fullTextStorage": false
+    },
+    {
+      "id": "reddit",
+      "status": "rejected",
+      "allowedUse": "no model training without express platform approval",
+      "fullTextStorage": false
+    },
+    {
+      "id": "telegram",
+      "status": "rejected",
+      "allowedUse": "no ML training validation benchmarking or deployment",
+      "fullTextStorage": false
+    },
+    {
+      "id": "x-twitter",
+      "status": "rejected-without-written-authorization",
+      "allowedUse": "none",
+      "fullTextStorage": false
+    }
+  ]
+}

@@ -39,9 +39,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "Unable to install the local MOHENG backend into the research runtime."
 }
 
-& $ResearchPython -c "import importlib.metadata as m; expected={'catboost':'1.2.10','cryptofeed':'2.4.1','lightgbm':'4.7.0','quantstats':'0.0.81','scikit-learn':'1.9.0','xgboost':'3.2.0'}; actual={k:m.version(k) for k in expected}; assert actual == expected, actual; print(actual)"
+& $ResearchPython -c "import importlib.metadata as m; expected={'catboost':'1.2.10','cryptofeed':'2.4.1','lightgbm':'4.7.0','quantstats':'0.0.81','scikit-learn':'1.9.0','vaderSentiment':'3.3.2','xgboost':'3.2.0'}; actual={k:m.version(k) for k in expected}; assert actual == expected, actual; print(actual)"
 if ($LASTEXITCODE -ne 0) {
     throw "Research dependency verification failed."
+}
+& $ResearchPython (Join-Path $ProjectRoot "research\vader_adapter.py") --self-test | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "VADER research adapter self-test failed."
 }
 
 Write-Host "Research runtime ready: $ResearchPython"
