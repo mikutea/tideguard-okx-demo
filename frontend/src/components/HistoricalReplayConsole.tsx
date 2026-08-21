@@ -143,7 +143,7 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
 
   return <section className="workspace-panel replay-console" aria-labelledby="replay-title">
     <div className="replay-titlebar">
-      <div className="replay-title-copy"><span className="replay-kicker"><BrainCircuit size={15} />CAUSAL REPLAY LAB · V3</span><h2 id="replay-title">历史高速回放训练场</h2><p>365 天滚动拟合，30 天重新训练；播放器只读取已冻结证据，不触发训练、私有 API 或订单。</p></div>
+      <div className="replay-title-copy"><span className="replay-kicker"><BrainCircuit size={15} />CAUSAL REPLAY LAB · V3</span><h2 id="replay-title">历史高速回放训练场</h2><p>365 天滚动训练协议（末 30 天隔离校准），每 30 天更迭；播放器只读取冻结证据，不触发训练、私有 API 或订单。</p></div>
       <div className="replay-safety-stamp" aria-label="历史回放安全边界"><ShieldCheck size={19} /><div><strong>研究隔离</strong><span>0 Shadow 天 · 0 下单能力</span></div></div>
     </div>
 

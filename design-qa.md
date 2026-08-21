@@ -83,7 +83,7 @@ final result: passed
 ### Above-the-fold copy diff
 
 - Before: the first major panel was “任务阶段与证据产物”, which described the latest training run but did not expose historical model evolution.
-- After: “历史高速回放训练场” appears first, with the explicit contract “365 天滚动拟合，30 天重新训练；播放器只读取已冻结证据，不触发训练、私有 API 或订单。” The original task-stage panel remains immediately below it.
+- After: “历史高速回放训练场” appears first, with the explicit contract “365 天滚动训练协议（末 30 天隔离校准），每 30 天更迭；播放器只读取冻结证据，不触发训练、私有 API 或订单。” The original task-stage panel remains immediately below it.
 
 ### Interaction and responsive proof
 
