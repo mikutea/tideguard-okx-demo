@@ -10,7 +10,7 @@ from .multi_asset_market import FIVE_MINUTES_MS
 from .pipeline import DEFAULT_LABEL_HORIZON
 
 
-HISTORICAL_REPLAY_SCHEMA_VERSION = "moheng.historical-replay.v1"
+HISTORICAL_REPLAY_SCHEMA_VERSION = "moheng.historical-replay.v2"
 
 
 class HistoricalReplayError(ValueError):
@@ -35,6 +35,7 @@ class ReplayBrokerConfig:
     latency_bars: int = 1
     holding_period_bars: int = DEFAULT_LABEL_HORIZON
     checkpoint_stride_bars: int = 288
+    capacity_handling: str = "reject"
 
     def __post_init__(self) -> None:
         numeric = {
@@ -59,6 +60,8 @@ class ReplayBrokerConfig:
             or self.holding_period_bars < 1
             or isinstance(self.checkpoint_stride_bars, bool)
             or self.checkpoint_stride_bars < 1
+            or not isinstance(self.capacity_handling, str)
+            or self.capacity_handling not in {"reject", "clip"}
         ):
             raise HistoricalReplayError("replay broker configuration is invalid")
 
@@ -66,10 +69,26 @@ class ReplayBrokerConfig:
     def round_trip_cost_bps(self) -> float:
         return 2.0 * (self.fee_bps_per_side + self.slippage_bps_per_side)
 
+    @property
+    def execution_label_horizon_bars(self) -> int:
+        return self.latency_bars + self.holding_period_bars
+
+    @property
+    def break_even_gross_return_bps(self) -> float:
+        fee = self.fee_bps_per_side / 10_000.0
+        slippage = self.slippage_bps_per_side / 10_000.0
+        gross_multiplier = ((1.0 + slippage) * (1.0 + fee)) / (
+            (1.0 - slippage) * (1.0 - fee)
+        )
+        return (gross_multiplier - 1.0) * 10_000.0
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "allocationFraction": self.allocation_fraction,
+            "breakEvenGrossReturnBps": self.break_even_gross_return_bps,
+            "capacityHandling": self.capacity_handling,
             "checkpointStrideBars": self.checkpoint_stride_bars,
+            "executionLabelHorizonBars": self.execution_label_horizon_bars,
             "feeBpsPerSide": self.fee_bps_per_side,
             "holdingPeriodBars": self.holding_period_bars,
             "latencyBars": self.latency_bars,
@@ -244,6 +263,7 @@ def run_historical_replay(
     qualifying_signals = 0
     orders_submitted = 0
     orders_rejected = 0
+    orders_clipped = 0
     next_entry_signal_index = 0
     open_position: _OpenPosition | None = None
     pending_entry: tuple[int, int, int, float, int] | None = None
@@ -256,6 +276,7 @@ def run_historical_replay(
     total_fees = 0.0
     estimated_slippage_cost = 0.0
     turnover_notional = 0.0
+    total_capacity_clip_notional = 0.0
 
     for index in range(time_rows):
         if open_position is not None and index == open_position.exit_index:
@@ -319,14 +340,25 @@ def run_historical_replay(
             raw_entry_price = float(candle_values[index, asset_index, 0])
             entry_fill_price = raw_entry_price * (1.0 + slippage_rate)
             available_cash = cash * broker.allocation_fraction
-            entry_notional = available_cash / (1.0 + fee_rate)
+            desired_entry_notional = available_cash / (1.0 + fee_rate)
+            entry_notional = desired_entry_notional
             quote_volume = float(candle_values[index, asset_index, 6])
             capacity = quote_volume * broker.max_quote_volume_participation
             rejection: str | None = None
             if entry_notional < broker.minimum_notional:
                 rejection = "minimum_notional_unavailable"
             elif entry_notional > capacity:
-                rejection = "quote_volume_capacity_exceeded"
+                if (
+                    broker.capacity_handling == "clip"
+                    and capacity >= broker.minimum_notional
+                ):
+                    entry_notional = capacity
+                    orders_clipped += 1
+                    total_capacity_clip_notional += (
+                        desired_entry_notional - entry_notional
+                    )
+                else:
+                    rejection = "quote_volume_capacity_exceeded"
             if rejection is not None:
                 orders_rejected += 1
                 rejection_reasons[rejection] = rejection_reasons.get(rejection, 0) + 1
@@ -434,6 +466,7 @@ def run_historical_replay(
         "netPnlByInstrument": net_pnl_by_instrument,
         "netReturn": final_equity / broker.starting_cash - 1.0,
         "ordersRejected": orders_rejected,
+        "ordersClipped": orders_clipped,
         "ordersSubmitted": orders_submitted,
         "policy": policy.to_dict(broker),
         "profitableTradeRate": (
@@ -444,6 +477,7 @@ def run_historical_replay(
         "simulatedDays": total_days,
         "timeRows": time_rows,
         "totalEstimatedSlippageCost": estimated_slippage_cost,
+        "totalCapacityClipNotional": total_capacity_clip_notional,
         "totalFees": total_fees,
         "trades": trades,
         "tradesByInstrument": trades_by_instrument,

@@ -143,14 +143,14 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
 
   return <section className="workspace-panel replay-console" aria-labelledby="replay-title">
     <div className="replay-titlebar">
-      <div className="replay-title-copy"><span className="replay-kicker"><BrainCircuit size={15} />CAUSAL REPLAY LAB · V3</span><h2 id="replay-title">历史高速回放训练场</h2><p>365 天滚动训练协议（末 30 天隔离校准），每 30 天更迭；播放器只读取冻结证据，不触发训练、私有 API 或订单。</p></div>
+      <div className="replay-title-copy"><span className="replay-kicker"><BrainCircuit size={15} />CAUSAL REPLAY LAB · V4</span><h2 id="replay-title">执行对齐历史回放训练场</h2><p>365 天滚动训练、末 30 天隔离校准；标签严格对应下一根开盘成交与 12 根后退出。播放器只读取冻结证据，不触发训练、私有 API 或订单。</p></div>
       <div className="replay-safety-stamp" aria-label="历史回放安全边界"><ShieldCheck size={19} /><div><strong>研究隔离</strong><span>0 Shadow 天 · 0 下单能力</span></div></div>
     </div>
 
     <div className="replay-kpi-strip">
       <div><span>模拟跨度</span><strong>{formatNumber(replay.simulatedDays, 0)} 天</strong><small>{replayDate(replay.firstReplayAt)} — {replayDate(replay.lastReplayAt)}</small></div>
       <div><span>周期更迭</span><strong>{replay.episodeCount} 代</strong><small>每 {formatNumber(replay.retrainEveryDays, 0)} 天重训</small></div>
-      <div><span>普通成本净收益</span><strong className={finite(replay.netReturn) < 0 ? "negative" : "positive"}>{formatPercent(replay.netReturn)}</strong><small>{formatNumber(replay.ordinaryCostBps, 0)} bps 往返</small></div>
+      <div><span>历史开发净收益</span><strong className={finite(replay.netReturn) < 0 ? "negative" : "positive"}>{formatPercent(replay.netReturn)}</strong><small>{formatNumber(replay.ordinaryCostBps, 0)} bps 往返 · 非未来承诺</small></div>
       <div><span>压力成本净收益</span><strong className={finite(replay.stressNetReturn) < 0 ? "negative" : "positive"}>{formatPercent(replay.stressNetReturn)}</strong><small>48 bps 往返</small></div>
       <div><span>最大回撤</span><strong>{drawdownPercent(replay.maxDrawdown)}</strong><small>{replay.tradeCount} 笔闭环</small></div>
       <div><span>物理压缩倍数</span><strong>{formatNumber(replay.compressionMultiple, 0)}×</strong><small>{formatNumber(replay.totalWallSeconds, 1)} 秒墙钟时间</small></div>
@@ -194,17 +194,19 @@ export function HistoricalReplayConsole({ replay }: { replay: HistoricalReplaySt
         <div className="replay-cycle-diagram">
           <div className="fit"><span>01</span><strong>滚动拟合</strong><small>{formatNumber(activeEpisode?.fitRows, 0)} 行</small></div><ChevronRight size={16} />
           <div className="cal"><span>02</span><strong>隔离校准</strong><small>{formatNumber(activeEpisode?.calibrationRows, 0)} 行</small></div><ChevronRight size={16} />
-          <div className="play"><span>03</span><strong>30 天回放</strong><small>{formatNumber(activeEpisode?.replayRows, 0)} 行</small></div>
+          <div className="play"><span>03</span><strong>执行对齐回放</strong><small>{formatNumber(activeEpisode?.replayRows, 0)} 行</small></div>
         </div>
         <dl className="replay-evidence-list">
           <div><dt>模型族</dt><dd>{replay.family ?? "—"}</dd></div>
           <div><dt>周期 ID</dt><dd><code>{shortId(activeEpisode?.episodeId, 14)}</code></dd></div>
           <div><dt>模型可用</dt><dd>{formatTime(activeEpisode?.availableAt)}</dd></div>
+          <div><dt>标签与成交对齐</dt><dd className={replay.targetExecutionAligned ? "positive" : "negative"}>{replay.targetExecutionAligned ? "已验证" : "未验证"}</dd></div>
+          <div><dt>容量处理</dt><dd>{replay.capacityHandling === "clip" ? `缩量成交 · ${replay.ordersClipped} 笔` : replay.capacityHandling ?? "—"}</dd></div>
           <div><dt>本代训练耗时</dt><dd>{formatNumber(activeEpisode?.trainingSeconds, 2)} 秒</dd></div>
           <div><dt>校准改善</dt><dd className={calibratedDelta === null ? undefined : calibratedDelta >= 0 ? "positive" : "negative"}>{calibratedDelta === null ? "—" : `${calibratedDelta >= 0 ? "+" : ""}${calibratedDelta.toFixed(4)}`}</dd></div>
           <div><dt>此刻回撤</dt><dd>{drawdownPercent(checkpoint?.drawdown)}</dd></div>
         </dl>
-        <div className={`replay-gate ${replay.developmentGatePassed ? "passed" : "blocked"}`}><LockKeyhole size={18} /><div><strong>{replay.developmentGatePassed ? "开发门槛通过，仍不可晋级" : "开发门槛未通过"}</strong><span>历史回放永远不累计 Shadow 天数，也不修改 BTC-USDT 执行白名单。</span></div></div>
+        <div className={`replay-gate ${replay.developmentGatePassed ? "passed" : "blocked"}`}><LockKeyhole size={18} /><div><strong>{replay.developmentGatePassed ? "历史开发门槛通过，仍不可晋级" : "历史开发门槛未通过"}</strong><span>{replay.selectionBiasWarning ? "本段历史已用于诊断，正收益可能偏乐观；" : ""}历史回放永远不累计 Shadow 天数，也不修改 BTC-USDT 执行白名单。</span></div></div>
       </aside>
     </div>
 

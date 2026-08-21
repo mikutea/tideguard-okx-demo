@@ -16,34 +16,24 @@ import numpy as np
 
 try:
     from .model_benchmark import (
-        MODEL_FAMILIES,
         _fit_model,
         _installed_versions,
-        _model_factory,
         _positive_scores,
     )
     from .multi_asset_benchmark import (
         CALIBRATION_BARS,
-        CALIBRATION_PURGE_BARS,
-        POLICY_CANDIDATES,
         _fit_fold_calibration,
-        _fold_training_windows,
         _score_diagnostics,
     )
 except ImportError:  # pragma: no cover - direct script execution
     from model_benchmark import (
-        MODEL_FAMILIES,
         _fit_model,
         _installed_versions,
-        _model_factory,
         _positive_scores,
     )
     from multi_asset_benchmark import (
         CALIBRATION_BARS,
-        CALIBRATION_PURGE_BARS,
-        POLICY_CANDIDATES,
         _fit_fold_calibration,
-        _fold_training_windows,
         _score_diagnostics,
     )
 from okx_demo_lab.ml.historical_replay import (
@@ -60,6 +50,7 @@ from okx_demo_lab.ml.multi_asset_cohort import (
 )
 from okx_demo_lab.ml.multi_asset_research import prepare_multi_asset_dataset
 from okx_demo_lab.ml.pipeline import DEFAULT_LABEL_HORIZON
+from okx_demo_lab.ml.research import ResearchModelSpec
 from okx_demo_lab.ml.strategy import canonical_json, sha256_hex
 from okx_demo_lab.ml.walk_forward import (
     TrainingConfig,
@@ -69,23 +60,49 @@ from okx_demo_lab.ml.walk_forward import (
 )
 
 
-REPLAY_REPORT_SCHEMA_VERSION = "moheng.historical-replay-report.v1"
+REPLAY_REPORT_SCHEMA_VERSION = "moheng.historical-replay-report.v2"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESEARCH_DATA_ROOT = PROJECT_ROOT / ".research-data"
 TRAIN_BARS = 365 * 24 * 12
 RETRAIN_BARS = 30 * 24 * 12
+EXECUTION_MODEL_FAMILY = "execution_hist_gradient_boosting"
+EXECUTION_MODEL_PARAMETERS = {
+    "class_weight": "balanced",
+    "early_stopping": False,
+    "l2_regularization": 2.0,
+    "learning_rate": 0.05,
+    "max_iter": 100,
+    "max_leaf_nodes": 15,
+    "min_samples_leaf": 200,
+    "random_state": 0,
+}
+V4_POLICY = (72.0, DEFAULT_LABEL_HORIZON)
+POLICY_SENSITIVITY_CANDIDATES = (
+    (48.0, DEFAULT_LABEL_HORIZON),
+    V4_POLICY,
+    (96.0, DEFAULT_LABEL_HORIZON),
+    (72.0, 24),
+    (72.0, 48),
+    (72.0, 96),
+)
+TARGET_RETURN_CLIP = (-0.99, 1.0)
 STANDARD_BROKER = ReplayBrokerConfig(
     fee_bps_per_side=8.0,
     slippage_bps_per_side=4.0,
     checkpoint_stride_bars=288,
+    capacity_handling="clip",
 )
 STRESS_BROKER = ReplayBrokerConfig(
     fee_bps_per_side=8.0,
     slippage_bps_per_side=16.0,
     checkpoint_stride_bars=288,
+    capacity_handling="clip",
 )
+EXECUTION_PURGE_BARS = STANDARD_BROKER.execution_label_horizon_bars + 1
 PROMOTION_BLOCKERS = (
     "historical_replay_development_only",
+    "development_history_observed_during_v4_diagnosis",
+    "policy_selected_on_reused_development_history",
     "fixed_current_survivor_cohort",
     "no_fresh_sealed_oos",
     "historical_order_book_unavailable",
@@ -141,9 +158,70 @@ def replay_walk_forward_spec(
         train_size=train_bars,
         test_size=replay_bars,
         step_size=replay_bars,
-        label_horizon=DEFAULT_LABEL_HORIZON,
+        label_horizon=STANDARD_BROKER.execution_label_horizon_bars,
         embargo_size=1,
         expanding=False,
+    )
+
+
+def _execution_model_factory() -> tuple[ResearchModelSpec, Any]:
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    spec = ResearchModelSpec(
+        EXECUTION_MODEL_FAMILY,
+        "scikit-learn",
+        _installed_versions()["scikit-learn"],
+        EXECUTION_MODEL_PARAMETERS,
+    )
+    return spec, lambda: HistGradientBoostingClassifier(
+        **EXECUTION_MODEL_PARAMETERS
+    )
+
+
+def _execution_training_windows(fold: Any) -> tuple[int, int, int, int]:
+    calibration_start = int(fold.train_stop) - CALIBRATION_BARS
+    model_fit_stop = calibration_start - EXECUTION_PURGE_BARS
+    if model_fit_stop <= int(fold.train_start):
+        raise ReplayResearchError("fold is too short for execution-aligned calibration")
+    return (
+        int(fold.train_start),
+        model_fit_stop,
+        calibration_start,
+        int(fold.train_stop),
+    )
+
+
+def _execution_aligned_targets(
+    candles: np.ndarray,
+    *,
+    raw_offset: int,
+    time_rows: int,
+    broker: ReplayBrokerConfig = STANDARD_BROKER,
+) -> tuple[np.ndarray, np.ndarray]:
+    values = np.asarray(candles, dtype=np.float64)
+    entry_offset = raw_offset + broker.latency_bars
+    exit_offset = entry_offset + broker.holding_period_bars
+    if (
+        values.ndim != 3
+        or values.shape[1] < 3
+        or values.shape[2] != 7
+        or raw_offset < 0
+        or time_rows < 1
+        or exit_offset + time_rows > values.shape[0]
+    ):
+        raise ReplayResearchError("execution target candles are not aligned")
+    entry_opens = values[entry_offset : entry_offset + time_rows, :, 0]
+    exit_opens = values[exit_offset : exit_offset + time_rows, :, 0]
+    gross_returns = exit_opens / entry_opens - 1.0
+    labels = (
+        gross_returns > broker.break_even_gross_return_bps / 10_000.0
+    ).astype(np.uint8)
+    if not np.all(np.isfinite(gross_returns)) or np.any(gross_returns <= -1.0):
+        raise ReplayResearchError("execution target returns are invalid")
+    calibrated_returns = np.clip(gross_returns, *TARGET_RETURN_CLIP)
+    return (
+        np.ascontiguousarray(labels, dtype=np.uint8),
+        np.ascontiguousarray(calibrated_returns, dtype=np.float64),
     )
 
 
@@ -199,10 +277,9 @@ def _evaluate_policies(
     episode_indices: np.ndarray,
     bindings: Sequence[ReplayEpisodeBinding],
 ) -> dict[str, Any]:
-    policy_development: dict[str, Any] = {}
+    policy_sensitivity: dict[str, Any] = {}
     ordinary_by_policy: dict[tuple[float, int], dict[str, Any]] = {}
-    ranked: list[tuple[bool, float, float, float, int, float]] = []
-    for edge_buffer_bps, spacing_bars in POLICY_CANDIDATES:
+    for edge_buffer_bps, spacing_bars in POLICY_SENSITIVITY_CANDIDATES:
         policy = ReplayPolicy(edge_buffer_bps, spacing_bars)
         ordinary = run_historical_replay(
             instruments,
@@ -216,25 +293,16 @@ def _evaluate_policies(
         )
         failures = _development_failures(ordinary)
         ordinary_by_policy[(edge_buffer_bps, spacing_bars)] = ordinary
-        policy_development[_policy_key(edge_buffer_bps, spacing_bars)] = {
+        policy_sensitivity[_policy_key(edge_buffer_bps, spacing_bars)] = {
             **_summary(ordinary),
             "developmentGatePassed": not failures,
             "failures": failures,
+            "selectedBeforeCanonicalRun": (
+                (edge_buffer_bps, spacing_bars) == V4_POLICY
+            ),
         }
-        ranked.append(
-            (
-                not failures,
-                float(ordinary["netReturn"]),
-                -float(ordinary["maxDrawdown"]),
-                -float(ordinary["turnoverMultiple"]),
-                spacing_bars,
-                edge_buffer_bps,
-            )
-        )
-    chosen_rank = max(ranked)
-    chosen_key = (float(chosen_rank[-1]), int(chosen_rank[-2]))
-    chosen_policy = ReplayPolicy(*chosen_key)
-    ordinary = ordinary_by_policy[chosen_key]
+    chosen_policy = ReplayPolicy(*V4_POLICY)
+    ordinary = ordinary_by_policy[V4_POLICY]
     ordinary_failures = _development_failures(ordinary)
     stress = run_historical_replay(
         instruments,
@@ -251,12 +319,18 @@ def _evaluate_policies(
         "chosenPolicy": chosen_policy.to_dict(STANDARD_BROKER),
         "decision": "research_only",
         "developmentGatePassed": not ordinary_failures and not stress_failures,
+        "historicalSelectionBias": {
+            "developmentHistoryAlreadyObserved": True,
+            "freshSealedOosAvailable": False,
+            "policyCandidatesReported": len(POLICY_SENSITIVITY_CANDIDATES),
+            "resultMayBeOptimistic": True,
+        },
         "ordinary": {
             **ordinary,
             "developmentGatePassed": not ordinary_failures,
             "failures": ordinary_failures,
         },
-        "policyDevelopment": policy_development,
+        "policySensitivity": policy_sensitivity,
         "promotionBlockers": list(PROMOTION_BLOCKERS),
         "shadowDaysCredited": 0,
         "stress48Bps": {
@@ -275,7 +349,7 @@ def run_replay_research(
 ) -> dict[str, Any]:
     started = _utc_now()
     wall_started = time.perf_counter()
-    if family not in MODEL_FAMILIES:
+    if family != EXECUTION_MODEL_FAMILY:
         raise ReplayResearchError(f"unsupported model family: {family}")
     versions = _installed_versions()
     cohort = load_validated_cohort(cohort_manifest)
@@ -298,8 +372,19 @@ def run_replay_research(
         )
     ):
         raise ReplayResearchError("prepared features are not aligned to cohort candles")
+    valid_target_rows = min(
+        dataset.time_rows,
+        int(cohort.timestamps.size)
+        - raw_offset
+        - STANDARD_BROKER.execution_label_horizon_bars,
+    )
+    execution_labels, execution_returns = _execution_aligned_targets(
+        cohort.candles,
+        raw_offset=raw_offset,
+        time_rows=valid_target_rows,
+    )
     protocol = replay_walk_forward_spec()
-    folds = list(plan_walk_forward(dataset.time_rows, protocol))
+    folds = list(plan_walk_forward(valid_target_rows, protocol))
     if max_episodes is not None:
         if max_episodes < 1:
             raise ReplayResearchError("max-episodes must be positive")
@@ -309,7 +394,7 @@ def run_replay_research(
     if any(left.test_stop != right.test_start for left, right in zip(folds, folds[1:])):
         raise ReplayResearchError("replay episode test windows are not contiguous")
 
-    spec, factory = _model_factory(family)
+    spec, factory = _execution_model_factory()
     expected_chunks: list[np.ndarray] = []
     episode_payloads: list[dict[str, Any]] = []
     bindings: list[ReplayEpisodeBinding] = []
@@ -328,24 +413,36 @@ def run_replay_research(
     for position, fold in enumerate(folds, start=1):
         episode_started = time.perf_counter()
         fit_start, fit_stop, calibration_start, calibration_stop = (
-            _fold_training_windows(fold)
+            _execution_training_windows(fold)
         )
-        label_complete_index = calibration_stop - 1 + DEFAULT_LABEL_HORIZON
+        label_complete_index = (
+            calibration_stop
+            - 1
+            + STANDARD_BROKER.execution_label_horizon_bars
+        )
         available_index = label_complete_index + protocol.embargo_size
         if available_index >= fold.test_start:
             raise ReplayResearchError("episode labels are not available before replay")
-        fit_features, fit_labels = dataset.flat_window(fit_start, fit_stop)
-        calibration_features, calibration_labels = dataset.flat_window(
-            calibration_start, calibration_stop
+        fit_features = dataset.features[fit_start:fit_stop].reshape(
+            -1, len(dataset.feature_names)
         )
-        calibration_returns = dataset.forward_returns[
+        fit_labels = execution_labels[fit_start:fit_stop].reshape(-1)
+        calibration_features = dataset.features[
+            calibration_start:calibration_stop
+        ].reshape(-1, len(dataset.feature_names))
+        calibration_labels = execution_labels[
+            calibration_start:calibration_stop
+        ].reshape(-1)
+        calibration_returns = execution_returns[
             calibration_start:calibration_stop
         ].reshape(-1)
         test_features = dataset.features[
             fold.test_start : fold.test_stop
         ].reshape(-1, len(dataset.feature_names))
-        test_labels = dataset.labels[fold.test_start : fold.test_stop].reshape(-1)
-        test_returns = dataset.forward_returns[
+        test_labels = execution_labels[
+            fold.test_start : fold.test_stop
+        ].reshape(-1)
+        test_returns = execution_returns[
             fold.test_start : fold.test_stop
         ].reshape(-1)
         model = factory()
@@ -375,6 +472,7 @@ def run_replay_research(
                 {
                     "cohort": dataset.cohort_sha256,
                     "family": family,
+                    "targetContract": "next-open-to-plus-12-open-gross-return",
                     "fitStart": fit_start,
                     "fitStop": fit_stop,
                     "calibrationStart": calibration_start,
@@ -492,12 +590,13 @@ def run_replay_research(
             "publicDataOnly": True,
         },
         "leakageAudit": {
-            "calibrationPurgeBars": CALIBRATION_PURGE_BARS,
+            "calibrationPurgeBars": EXECUTION_PURGE_BARS,
             "episodeAvailabilityBound": True,
             "futureLabelsBeforeDecision": 0,
             "nextBarExecution": True,
             "sameBarFillAllowed": False,
             "strictFiveMinuteGrid": True,
+            "targetExecutionAligned": True,
         },
         "model": {
             "calibratedBrier": weighted_calibrated_brier / diagnostic_rows,
@@ -508,18 +607,39 @@ def run_replay_research(
             "rawBrier": weighted_raw_brier / diagnostic_rows,
             "spec": spec.to_dict(),
             "specSha256": spec.sha256,
+            "targetContract": {
+                "decisionAt": "confirmed_bar_close",
+                "entryAt": "next_bar_open",
+                "exitAt": "entry_plus_12_bars_open",
+                "labelBreakEvenGrossReturnBps": (
+                    STANDARD_BROKER.break_even_gross_return_bps
+                ),
+                "labelHorizonBars": (
+                    STANDARD_BROKER.execution_label_horizon_bars
+                ),
+                "predictionUnit": "gross_return",
+                "returnClip": list(TARGET_RETURN_CLIP),
+            },
         },
         "packages": versions,
         "promotable": False,
         "promotionBlockers": list(PROMOTION_BLOCKERS),
         "protocol": {
             "calibrationBars": CALIBRATION_BARS,
+            "capacityHandling": STANDARD_BROKER.capacity_handling,
+            "developmentHistoryAlreadyObserved": True,
             "episodeCount": len(folds),
+            "executionLabelHorizonBars": (
+                STANDARD_BROKER.execution_label_horizon_bars
+            ),
             "holdingBars": DEFAULT_LABEL_HORIZON,
+            "policyCandidatesReported": len(POLICY_SENSITIVITY_CANDIDATES),
+            "policySelectionScope": (
+                "fixed-v4-development-hypothesis-on-reused-history"
+            ),
             "retrainEveryBars": RETRAIN_BARS,
             "retrainEveryDays": RETRAIN_BARS / 288.0,
             "scope": "retrospective-development-only",
-            "policySelectionScope": "same-replay-development-only",
             "trainBars": TRAIN_BARS,
             "walkForward": protocol.to_dict(),
         },
@@ -564,11 +684,11 @@ def _write_report(path: Path, report: dict[str, Any]) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the research-only V3 historical market replay."
+        description="Run the research-only V4 execution-aligned market replay."
     )
     parser.add_argument("--cohort", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--family", default="hist_gradient_boosting")
+    parser.add_argument("--family", default=EXECUTION_MODEL_FAMILY)
     parser.add_argument("--max-episodes", type=int)
     return parser.parse_args()
 

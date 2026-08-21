@@ -84,6 +84,31 @@ def test_replay_rejects_order_above_historical_volume_capacity() -> None:
     assert result["rejectionReasons"] == {"quote_volume_capacity_exceeded": 1}
 
 
+def test_replay_can_clip_notional_to_historical_volume_capacity() -> None:
+    expected = np.zeros((80, 3), dtype=np.float64)
+    expected[2, 0] = 0.02
+
+    result = _run(
+        expected,
+        capacity_handling="clip",
+        max_quote_volume_participation=0.0001,
+    )
+
+    assert result["ordersSubmitted"] == 1
+    assert result["ordersRejected"] == 0
+    assert result["ordersClipped"] == 1
+    assert result["totalCapacityClipNotional"] > 0.0
+    assert len(result["trades"]) == 1
+    assert result["broker"]["capacityHandling"] == "clip"
+    assert result["broker"]["executionLabelHorizonBars"] == 13
+
+
+@pytest.mark.parametrize("capacity_handling", ["scale", None, []])
+def test_replay_rejects_invalid_capacity_handling(capacity_handling: object) -> None:
+    with pytest.raises(HistoricalReplayError, match="configuration is invalid"):
+        ReplayBrokerConfig(capacity_handling=capacity_handling)  # type: ignore[arg-type]
+
+
 def test_future_signal_mutation_cannot_change_earlier_replay_trade() -> None:
     baseline = np.zeros((80, 3), dtype=np.float64)
     baseline[2, 0] = 0.02

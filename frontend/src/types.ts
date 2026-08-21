@@ -338,6 +338,7 @@ export interface ResearchMonitorStatus {
 export interface HistoricalReplayStatus {
   blockers: string[];
   calibrationImproved: boolean;
+  capacityHandling: string | null;
   cashBarRate: number | null;
   checkpoints: Array<{
     at: string;
@@ -357,6 +358,7 @@ export interface HistoricalReplayStatus {
   compressionMultiple: number | null;
   decision: string | null;
   developmentGatePassed: boolean;
+  developmentHistoryAlreadyObserved: boolean;
   episodeCount: number;
   episodes: Array<{
     assetRows: number;
@@ -383,6 +385,8 @@ export interface HistoricalReplayStatus {
   lastReplayAt: string | null;
   maxDrawdown: number | null;
   netReturn: number | null;
+  ordersClipped: number;
+  ordersRejected: number;
   ordinaryCostBps: number | null;
   promotable: boolean;
   replayId: string | null;
@@ -390,10 +394,12 @@ export interface HistoricalReplayStatus {
   retrainEveryDays: number | null;
   schemaVersion: string | null;
   shadowDaysCredited: number;
+  selectionBiasWarning: boolean;
   simulatedDays: number | null;
   startingCash: number | null;
   stressNetReturn: number | null;
   totalEstimatedSlippageCost: number | null;
+  targetExecutionAligned: boolean;
   totalFees: number | null;
   totalWallSeconds: number | null;
   tradeCount: number;

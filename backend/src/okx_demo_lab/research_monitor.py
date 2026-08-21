@@ -265,11 +265,12 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
     if not replay_root.is_dir():
         return None
     candidates: list[tuple[int, Path]] = []
-    for path in replay_root.glob("historical-replay-v3-*.json"):
-        try:
-            candidates.append((path.stat().st_mtime_ns, path))
-        except OSError:
-            continue
+    for pattern in ("historical-replay-v4-*.json", "historical-replay-v3-*.json"):
+        for path in replay_root.glob(pattern):
+            try:
+                candidates.append((path.stat().st_mtime_ns, path))
+            except OSError:
+                continue
     for _, path in sorted(candidates, reverse=True)[:100]:
         value = _read_json(path)
         if value is None:
@@ -277,10 +278,62 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
         report_hash = value.get("reportSha256")
         execution = value.get("execution")
         execution_value = execution if isinstance(execution, dict) else {}
+        schema_version = value.get("schemaVersion")
+        leakage = value.get("leakageAudit")
+        leakage_value = leakage if isinstance(leakage, dict) else {}
+        model = value.get("model")
+        model_value = model if isinstance(model, dict) else {}
+        target = model_value.get("targetContract")
+        target_value = target if isinstance(target, dict) else {}
+        dataset = value.get("dataset")
+        dataset_value = dataset if isinstance(dataset, dict) else {}
+        protocol = value.get("protocol")
+        protocol_value = protocol if isinstance(protocol, dict) else {}
+        timing = value.get("timing")
+        timing_value = timing if isinstance(timing, dict) else {}
+        result = value.get("result")
+        result_value = result if isinstance(result, dict) else {}
+        ordinary = result_value.get("ordinary")
+        ordinary_value = ordinary if isinstance(ordinary, dict) else {}
+        ordinary_broker = ordinary_value.get("broker")
+        ordinary_broker_value = (
+            ordinary_broker if isinstance(ordinary_broker, dict) else {}
+        )
+        stress = result_value.get("stress48Bps")
+        stress_value = stress if isinstance(stress, dict) else {}
+        policy = result_value.get("chosenPolicy")
+        policy_value = policy if isinstance(policy, dict) else {}
+        selection_bias = result_value.get("historicalSelectionBias")
+        selection_bias_value = (
+            selection_bias if isinstance(selection_bias, dict) else {}
+        )
+        v4_contract_valid = bool(
+            schema_version != "moheng.historical-replay-report.v2"
+            or (
+                execution_value.get("engineSchemaVersion")
+                == "moheng.historical-replay.v2"
+                and leakage_value.get("targetExecutionAligned") is True
+                and target_value.get("decisionAt") == "confirmed_bar_close"
+                and target_value.get("entryAt") == "next_bar_open"
+                and target_value.get("exitAt") == "entry_plus_12_bars_open"
+                and target_value.get("labelHorizonBars") == 13
+                and target_value.get("predictionUnit") == "gross_return"
+                and protocol_value.get("executionLabelHorizonBars") == 13
+                and protocol_value.get("developmentHistoryAlreadyObserved")
+                is True
+                and ordinary_broker_value.get("capacityHandling") == "clip"
+                and ordinary_broker_value.get("executionLabelHorizonBars") == 13
+                and selection_bias_value.get("resultMayBeOptimistic") is True
+            )
+        )
         valid = bool(
             _canonical_hash_matches(value, report_hash, excluded={"reportSha256"})
-            and value.get("schemaVersion")
-            == "moheng.historical-replay-report.v1"
+            and schema_version
+            in {
+                "moheng.historical-replay-report.v1",
+                "moheng.historical-replay-report.v2",
+            }
+            and v4_contract_valid
             and value.get("promotable") is False
             and value.get("shadowDaysCredited") == 0
             and value.get("decision") == "research_only"
@@ -290,22 +343,6 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
             and execution_value.get("publicDataOnly") is True
             and execution_value.get("executionAllowlistChanged") is False
         )
-        dataset = value.get("dataset")
-        dataset_value = dataset if isinstance(dataset, dict) else {}
-        protocol = value.get("protocol")
-        protocol_value = protocol if isinstance(protocol, dict) else {}
-        model = value.get("model")
-        model_value = model if isinstance(model, dict) else {}
-        timing = value.get("timing")
-        timing_value = timing if isinstance(timing, dict) else {}
-        result = value.get("result")
-        result_value = result if isinstance(result, dict) else {}
-        ordinary = result_value.get("ordinary")
-        ordinary_value = ordinary if isinstance(ordinary, dict) else {}
-        stress = result_value.get("stress48Bps")
-        stress_value = stress if isinstance(stress, dict) else {}
-        policy = result_value.get("chosenPolicy")
-        policy_value = policy if isinstance(policy, dict) else {}
         checkpoints_value = ordinary_value.get("checkpoints")
         checkpoints = (
             [item for item in checkpoints_value if isinstance(item, dict)][:2_000]
@@ -356,6 +393,7 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
         return {
             "blockers": blockers,
             "calibrationImproved": model_value.get("calibrationImproved") is True,
+            "capacityHandling": ordinary_broker_value.get("capacityHandling"),
             "checkpoints": checkpoints,
             "chosenPolicy": {
                 "edgeBufferBps": policy_value.get("edgeBufferBps"),
@@ -372,6 +410,9 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
             "decision": value.get("decision"),
             "developmentGatePassed": result_value.get("developmentGatePassed")
             is True,
+            "developmentHistoryAlreadyObserved": (
+                protocol_value.get("developmentHistoryAlreadyObserved") is True
+            ),
             "episodeCount": _integer(protocol_value.get("episodeCount")),
             "episodes": episodes,
             "family": model_value.get("family"),
@@ -380,27 +421,27 @@ def _latest_replay(root: Path) -> dict[str, Any] | None:
             "lastReplayAt": dataset_value.get("lastReplayAt"),
             "maxDrawdown": ordinary_value.get("maxDrawdown"),
             "netReturn": ordinary_value.get("netReturn"),
+            "ordersClipped": _integer(ordinary_value.get("ordersClipped")),
+            "ordersRejected": _integer(ordinary_value.get("ordersRejected")),
             "cashBarRate": ordinary_value.get("cashBarRate"),
-            "ordinaryCostBps": (
-                ordinary_value.get("broker", {}).get("roundTripCostBps")
-                if isinstance(ordinary_value.get("broker"), dict)
-                else None
-            ),
+            "ordinaryCostBps": ordinary_broker_value.get("roundTripCostBps"),
             "promotable": value.get("promotable") is True,
             "replayId": value.get("replayId"),
             "retrainEveryDays": protocol_value.get("retrainEveryDays"),
             "reportSha256": report_hash,
             "schemaVersion": value.get("schemaVersion"),
             "shadowDaysCredited": _integer(value.get("shadowDaysCredited")),
-            "simulatedDays": ordinary_value.get("simulatedDays"),
-            "startingCash": (
-                ordinary_value.get("broker", {}).get("startingCash")
-                if isinstance(ordinary_value.get("broker"), dict)
-                else None
+            "selectionBiasWarning": (
+                selection_bias_value.get("resultMayBeOptimistic") is True
             ),
+            "simulatedDays": ordinary_value.get("simulatedDays"),
+            "startingCash": ordinary_broker_value.get("startingCash"),
             "stressNetReturn": stress_value.get("netReturn"),
             "totalEstimatedSlippageCost": ordinary_value.get(
                 "totalEstimatedSlippageCost"
+            ),
+            "targetExecutionAligned": (
+                leakage_value.get("targetExecutionAligned") is True
             ),
             "totalFees": ordinary_value.get("totalFees"),
             "totalWallSeconds": timing_value.get("totalWallSeconds"),

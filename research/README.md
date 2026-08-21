@@ -102,10 +102,12 @@ OOS。任何结果仍固定为 `research_only` 和 `promotable=false`；只有�
 
 ## Phase 3: 历史高速回放训练场
 
-V3 把内容寻址的多资产 cohort 变成一个因果历史时钟：每个模型只看当时已经完成
+V4 把内容寻址的多资产 cohort 变成一个因果历史时钟：每个模型只看当时已经完成
 标签的数据，使用 365 天滚动训练协议，其中末 30 天作为隔离校准窗、此前数据用于
-基础模型拟合；随后回放 30 天，再训练下一代模型。信号至少延迟一根 5 分钟 K 线成交；虚拟 SPOT 经纪商维护单一现金
-账本，并显式扣除双边手续费、滑点和历史成交量容量约束：
+基础模型拟合；随后回放 30 天，再训练下一代模型。V4 标签严格对应确认线收盘决策、
+下一根开盘成交和 12 根后开盘退出，避免 V3 的训练目标与账本退出错配。虚拟 SPOT
+经纪商维护单一现金账本，并显式扣除双边手续费、滑点和历史成交量容量约束；超出
+容量的目标仓位只缩小到可成交规模并留下证据：
 
 ```powershell
 # 单周期冒烟测试
@@ -117,10 +119,10 @@ V3 把内容寻址的多资产 cohort 变成一个因果历史时钟：每个模
 # 独立复核哈希、因果时间线、逐笔延迟与现金账本
 & ".\.research-data\runtime\venv\Scripts\python.exe" `
   .\research\verify_historical_replay.py `
-  .\.research-data\replays\historical-replay-v3-<timestamp>.json
+  .\.research-data\replays\historical-replay-v4-<timestamp>.json
 ```
 
-证据写入 `.research-data/replays/historical-replay-v3-*.json`，训练中心会以逐日权益
+证据写入 `.research-data/replays/historical-replay-v4-*.json`，训练中心会以逐日权益
 曲线、可播放时钟和模型更迭轨展示最新一份通过哈希校验的报告。播放器只重放报告，
 不会重新训练，也不会访问私有 API。
 

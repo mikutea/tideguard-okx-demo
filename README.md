@@ -92,7 +92,7 @@ Codex Supervisor 只读取脱敏的模型/数据/策略哈希和验证指标：
 .\.venv\Scripts\python.exe -m okx_demo_lab.cli supervisor review
 ```
 
-完整说明见 [模型架构](docs/ML-ARCHITECTURE.md)、[长期自动量化架构](docs/AUTONOMY-ARCHITECTURE.md) 和 [历史数据仓库](docs/HISTORY-DATA.md)。历史高速回放可用 `scripts/run-historical-replay.ps1` 在冻结多资产 cohort 上按 30 天周期重训并回放；它固定为研究证据，不能累计 Shadow 天数或触发订单。
+完整说明见 [模型架构](docs/ML-ARCHITECTURE.md)、[长期自动量化架构](docs/AUTONOMY-ARCHITECTURE.md) 和 [历史数据仓库](docs/HISTORY-DATA.md)。历史高速回放可用 `scripts/run-historical-replay.ps1` 在冻结多资产 cohort 上按 30 天周期重训并回放。V4 已将标签对齐到下一根开盘成交与 12 根后退出；最新历史开发结果和集中度限制见 [V4 执行对齐历史收益诊断](docs/reports/v4-profitability/report.html)。它固定为研究证据，不能累计 Shadow 天数或触发订单。
 
 ## 第三方模型研究层
 

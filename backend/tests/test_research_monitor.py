@@ -388,3 +388,53 @@ def test_monitor_rejects_tampered_historical_replay(tmp_path) -> None:
 
     assert status["replay"]["valid"] is False
     assert "historical_replay_integrity_unverified" in status["blockers"]
+
+
+def test_monitor_surfaces_execution_aligned_v4_replay(tmp_path) -> None:
+    root = tmp_path / ".research-data"
+    root.mkdir()
+    path = root / "replays" / "historical-replay-v4-test.json"
+    report = _replay_report("cohort_" + "b" * 24)
+    report.pop("reportSha256")
+    report["schemaVersion"] = "moheng.historical-replay-report.v2"
+    report["execution"]["engineSchemaVersion"] = "moheng.historical-replay.v2"
+    report["leakageAudit"] = {"targetExecutionAligned": True}
+    report["model"]["targetContract"] = {
+        "decisionAt": "confirmed_bar_close",
+        "entryAt": "next_bar_open",
+        "exitAt": "entry_plus_12_bars_open",
+        "labelHorizonBars": 13,
+        "predictionUnit": "gross_return",
+    }
+    report["protocol"].update(
+        {
+            "developmentHistoryAlreadyObserved": True,
+            "executionLabelHorizonBars": 13,
+        }
+    )
+    report["result"]["historicalSelectionBias"] = {
+        "resultMayBeOptimistic": True
+    }
+    report["result"]["ordinary"]["broker"].update(
+        {"capacityHandling": "clip", "executionLabelHorizonBars": 13}
+    )
+    report["result"]["ordinary"].update(
+        {"ordersClipped": 4, "ordersRejected": 0}
+    )
+    report["reportSha256"] = sha256_hex(canonical_json(report))
+    _write_json(path, report)
+
+    replay = ResearchMonitor(root).status()["replay"]
+
+    assert replay["valid"] is True
+    assert replay["targetExecutionAligned"] is True
+    assert replay["capacityHandling"] == "clip"
+    assert replay["ordersClipped"] == 4
+    assert replay["selectionBiasWarning"] is True
+
+    report.pop("reportSha256")
+    report["model"]["targetContract"].pop("decisionAt")
+    report["reportSha256"] = sha256_hex(canonical_json(report))
+    _write_json(path, report)
+
+    assert ResearchMonitor(root).status()["replay"]["valid"] is False

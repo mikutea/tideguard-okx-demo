@@ -6,7 +6,9 @@ import pytest
 from okx_demo_lab.ml.historical_replay import ReplayEpisodeBinding
 import research.historical_replay as replay_module
 from research.historical_replay import (
+    EXECUTION_MODEL_FAMILY,
     ReplayResearchError,
+    _execution_aligned_targets,
     _evaluate_policies,
     _inside_research_subdir,
     _write_report,
@@ -37,7 +39,7 @@ def test_replay_protocol_is_rolling_365_day_training_and_30_day_retraining() -> 
     assert spec.train_size == 365 * 288
     assert spec.test_size == 30 * 288
     assert spec.step_size == 30 * 288
-    assert spec.label_horizon == 12
+    assert spec.label_horizon == 13
     assert spec.embargo_size == 1
     assert spec.expanding is False
 
@@ -58,9 +60,35 @@ def test_policy_replay_is_always_research_only_and_shadow_days_stay_zero() -> No
     assert result["shadowDaysCredited"] == 0
     assert "historical_replay_development_only" in result["promotionBlockers"]
     assert "requires_90_day_forward_public_shadow" in result["promotionBlockers"]
-    assert len(result["policyDevelopment"]) == 6
+    assert len(result["policySensitivity"]) == 6
+    assert result["chosenPolicy"]["edgeBufferBps"] == 72.0
+    assert result["chosenPolicy"]["minEntrySpacingBars"] == 12
+    assert result["historicalSelectionBias"]["resultMayBeOptimistic"] is True
     assert result["ordinary"]["leakageGuard"]["sameBarFillAllowed"] is False
     assert result["stress48Bps"]["broker"]["roundTripCostBps"] == 48.0
+    assert result["ordinary"]["broker"]["capacityHandling"] == "clip"
+
+
+def test_execution_targets_match_next_open_and_fixed_horizon_exit() -> None:
+    _, candles, _ = _replay_arrays(rows=80)
+    candles[:, :, 0] = np.arange(80, dtype=np.float64)[:, None] + np.asarray(
+        [100.0, 200.0, 300.0]
+    )
+
+    labels, returns = _execution_aligned_targets(
+        candles,
+        raw_offset=2,
+        time_rows=20,
+    )
+
+    expected = candles[15:35, :, 0] / candles[3:23, :, 0] - 1.0
+    assert np.allclose(returns, expected)
+    assert np.array_equal(
+        labels,
+        expected
+        > replay_module.STANDARD_BROKER.break_even_gross_return_bps / 10_000.0,
+    )
+    assert EXECUTION_MODEL_FAMILY == "execution_hist_gradient_boosting"
 
 
 def test_replay_paths_are_confined_to_project_research_subdirectories(

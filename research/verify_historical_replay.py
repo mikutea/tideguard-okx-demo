@@ -61,8 +61,13 @@ def verify_report(report: dict[str, Any]) -> dict[str, Any]:
     )
     execution = report.get("execution")
     _require(isinstance(execution, dict), "execution contract is missing")
+    schema_version = report.get("schemaVersion")
     _require(
-        report.get("schemaVersion") == "moheng.historical-replay-report.v1"
+        schema_version
+        in {
+            "moheng.historical-replay-report.v1",
+            "moheng.historical-replay-report.v2",
+        }
         and report.get("decision") == "research_only"
         and report.get("promotable") is False
         and report.get("shadowDaysCredited") == 0
@@ -106,6 +111,24 @@ def verify_report(report: dict[str, Any]) -> dict[str, Any]:
         and protocol.get("scope") == "retrospective-development-only",
         "rolling replay protocol is invalid",
     )
+    if schema_version == "moheng.historical-replay-report.v2":
+        model = report.get("model")
+        _require(isinstance(model, dict), "model contract is invalid")
+        target = model.get("targetContract")
+        leakage = report.get("leakageAudit")
+        _require(
+            isinstance(target, dict)
+            and target.get("decisionAt") == "confirmed_bar_close"
+            and target.get("entryAt") == "next_bar_open"
+            and target.get("exitAt") == "entry_plus_12_bars_open"
+            and target.get("labelHorizonBars") == 13
+            and target.get("predictionUnit") == "gross_return"
+            and isinstance(leakage, dict)
+            and leakage.get("targetExecutionAligned") is True
+            and protocol.get("executionLabelHorizonBars") == 13
+            and protocol.get("developmentHistoryAlreadyObserved") is True,
+            "V4 execution target or selection-bias contract failed",
+        )
 
     previous_stop: int | None = None
     episode_ids: set[str] = set()
@@ -176,6 +199,15 @@ def verify_report(report: dict[str, Any]) -> dict[str, Any]:
         and leakage.get("sameBarFillAllowed") is False,
         "broker cost or leakage contract failed",
     )
+    if schema_version == "moheng.historical-replay-report.v2":
+        _require(
+            ordinary_broker.get("capacityHandling") == "clip"
+            and ordinary_broker.get("executionLabelHorizonBars") == 13
+            and stress_broker.get("capacityHandling") == "clip"
+            and execution.get("engineSchemaVersion")
+            == "moheng.historical-replay.v2",
+            "V4 capacity or engine contract failed",
+        )
     starting_cash = _number(ordinary_broker.get("startingCash"), "startingCash")
     final_cash = _number(ordinary.get("finalCash"), "finalCash")
     max_drawdown = _number(ordinary.get("maxDrawdown"), "maxDrawdown")
@@ -260,7 +292,7 @@ def verify_report(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Verify one V3 historical replay report.")
+    parser = argparse.ArgumentParser(description="Verify one V3/V4 historical replay report.")
     parser.add_argument("report", type=Path)
     return parser.parse_args()
 
