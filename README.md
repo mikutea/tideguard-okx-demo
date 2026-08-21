@@ -94,6 +94,23 @@ Codex Supervisor 只读取脱敏的模型/数据/策略哈希和验证指标：
 
 完整说明见 [模型架构](docs/ML-ARCHITECTURE.md)、[长期自动量化架构](docs/AUTONOMY-ARCHITECTURE.md) 和 [历史数据仓库](docs/HISTORY-DATA.md)。
 
+## 第三方模型研究层
+
+GitHub 上的模型、框架和“高收益策略”不会直接进入执行器。隔离的 Python
+3.11 研究层会在同一不可变全历史快照上本地重训 scikit-learn、LightGBM、
+XGBoost、CatBoost 和 MLP，并统一执行 30 折 rolling OOS、最后四折封存以及
+双成本压力测试：
+
+```powershell
+.\scripts\setup-research.ps1
+.\scripts\run-research-benchmark.ps1
+```
+
+2026-08-21 的首轮六模型加集成评测全部被拒绝，没有模型进入 registry、
+shadow 或订单链。精确协议、指标与 canonical 报告哈希见
+[第三方模型基准](docs/THIRD-PARTY-BENCHMARK.md)，源码与许可边界见
+[研究准入清单](research/THIRD-PARTY.md)。
+
 ## 验证与发行
 
 ```powershell
@@ -111,6 +128,7 @@ backend/    FastAPI、OKX profile、数据仓库、ML、监督、风控与 SQLit
 frontend/   React + Vite 专业可视化驾驶舱
 desktop/    pywebview 桌面宿主、daemon 与隔离凭证窗口
 packaging/  PyInstaller、Inno Setup、锁文件和 GitHub Release 构建
+research/   隔离的第三方模型、锁定依赖、报告与许可准入
 scripts/    Windows 安装、启动与离线检查
 docs/       数据、模型、Live 安全、设计和验证记录
 ```

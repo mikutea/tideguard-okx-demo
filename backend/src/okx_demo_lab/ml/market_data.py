@@ -737,7 +737,12 @@ class MarketDataStore:
 
             complete = reached_origin
             partial = not complete
-            completed_at = datetime.now(timezone.utc)
+            # ``now`` is the run's injected, timezone-aware clock.  Persisting
+            # wall time here made origin confirmation non-deterministic and
+            # could even move backwards relative to the next run when a caller
+            # supplies a controlled clock.  The confirmation delay is between
+            # run starts, so use the same captured instant throughout the run.
+            completed_at = current_now
             with self._lock, self._connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 _count, actual_oldest, _latest = self._coverage(db)
@@ -775,7 +780,7 @@ class MarketDataStore:
                 )
             return {**self.status(), "runId": run_id}
         except BaseException as exc:
-            failed_at = datetime.now(timezone.utc)
+            failed_at = current_now
             try:
                 with self._lock, self._connection() as db:
                     db.execute("BEGIN IMMEDIATE")

@@ -773,6 +773,108 @@ def _evaluate_fold(
         linear = np.clip(model.intercept + normalized @ coefficients, -700.0, 700.0)
         scores = 1.0 / (1.0 + np.exp(-linear))
         matrix_values = labels_array, returns_array, scores
+    if matrix_values is None:
+        trades = 0
+        correct = 0
+        evaluated_rows = 0
+        equity = 1.0
+        gross_equity = 1.0
+        peak = 1.0
+        max_drawdown = 0.0
+        cost = cost_bps / 10_000.0
+        cursor = 0
+        entry_stop = len(rows) - holding_period_bars
+        while cursor < entry_stop:
+            row = rows[cursor]
+            features = dict(zip(feature_names, row.features, strict=True))
+            action, _score = model.action(features)
+            buy = action == "buy"
+            correct += int(int(buy) == row.label)
+            evaluated_rows += 1
+            if not buy:
+                cursor += 1
+                continue
+            gross = row.forward_return
+            net = gross - cost
+            trades += 1
+            gross_equity *= max(0.0, 1.0 + gross)
+            equity *= max(0.0, 1.0 + net)
+            peak = max(peak, equity)
+            drawdown = (peak - equity) / peak if peak else 1.0
+            max_drawdown = max(max_drawdown, drawdown)
+            cursor += holding_period_bars
+        return (
+            trades,
+            correct / evaluated_rows,
+            gross_equity - 1.0,
+            equity - 1.0,
+            max_drawdown,
+            evaluated_rows,
+        )
+    labels_array, returns_array, scores = matrix_values
+    return evaluate_score_vector(
+        labels_array,
+        returns_array,
+        scores,
+        buy_threshold=float(getattr(model, "buy_threshold", 0.6)),
+        cost_bps=cost_bps,
+        holding_period_bars=holding_period_bars,
+    )
+
+
+def evaluate_score_vector(
+    labels: Sequence[int] | np.ndarray,
+    forward_returns: Sequence[float] | np.ndarray,
+    scores: Sequence[float] | np.ndarray,
+    *,
+    buy_threshold: float,
+    cost_bps: float,
+    holding_period_bars: int,
+) -> tuple[int, float, float, float, float, int]:
+    """Evaluate frozen probability scores with the production v4 semantics.
+
+    This is the only supported bridge for third-party research models.  It
+    accepts predictions, never executable model objects, and applies the same
+    cash-SPOT long/flat, non-overlapping-capital and cost rules as native
+    candidates.
+    """
+
+    labels_array = np.asarray(labels)
+    returns_array = np.asarray(forward_returns, dtype=np.float64)
+    scores_array = np.asarray(scores, dtype=np.float64)
+    if (
+        labels_array.ndim != 1
+        or returns_array.ndim != 1
+        or scores_array.ndim != 1
+        or labels_array.shape != returns_array.shape
+        or labels_array.shape != scores_array.shape
+    ):
+        raise ValidationError("score evaluation vectors must be aligned and one-dimensional")
+    if labels_array.size <= holding_period_bars or holding_period_bars < 1:
+        raise ValidationError("score evaluation window is too short")
+    if (
+        isinstance(buy_threshold, bool)
+        or not math.isfinite(float(buy_threshold))
+        or not 0.5 < float(buy_threshold) < 1.0
+    ):
+        raise ValidationError("score evaluation buy threshold is invalid")
+    if (
+        isinstance(cost_bps, bool)
+        or not math.isfinite(float(cost_bps))
+        or not 0.0 < float(cost_bps) <= 1_000.0
+    ):
+        raise ValidationError("score evaluation cost is invalid")
+    if (
+        np.any((labels_array != 0) & (labels_array != 1))
+        or not np.all(np.isfinite(returns_array))
+        or np.any(returns_array <= -1.0)
+        or np.any(returns_array > 1.0)
+        or not np.all(np.isfinite(scores_array))
+        or np.any(scores_array < 0.0)
+        or np.any(scores_array > 1.0)
+    ):
+        raise ValidationError("score evaluation vectors contain invalid values")
+
     trades = 0
     correct = 0
     evaluated_rows = 0
@@ -780,28 +882,17 @@ def _evaluate_fold(
     gross_equity = 1.0
     peak = 1.0
     max_drawdown = 0.0
-    cost = cost_bps / 10_000.0
+    cost = float(cost_bps) / 10_000.0
     cursor = 0
-    entry_stop = len(rows) - holding_period_bars
+    entry_stop = int(labels_array.size) - holding_period_bars
     while cursor < entry_stop:
-        if matrix_values is not None:
-            labels_array, returns_array, scores = matrix_values
-            action = "buy" if float(scores[cursor]) >= model.buy_threshold else "flat"
-            label = int(labels_array[cursor])
-            gross = float(returns_array[cursor])
-        else:
-            row = rows[cursor]
-            features = dict(zip(feature_names, row.features, strict=True))
-            action, _score = model.action(features)
-            label = row.label
-            gross = row.forward_return
-        predicted_label = 1 if action == "buy" else 0
-        correct += int(predicted_label == label)
+        buy = float(scores_array[cursor]) >= float(buy_threshold)
+        correct += int(int(buy) == int(labels_array[cursor]))
         evaluated_rows += 1
-        if action != "buy":
+        if not buy:
             cursor += 1
             continue
-
+        gross = float(returns_array[cursor])
         net = gross - cost
         trades += 1
         gross_equity *= max(0.0, 1.0 + gross)

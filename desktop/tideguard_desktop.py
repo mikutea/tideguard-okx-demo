@@ -656,15 +656,13 @@ def run(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv == ["--self-test"]:
         # Build verification must not create logs or state under the real
-        # user's LOCALAPPDATA. It reports success/failure only by exit code.
-        self_test_instance = SingleInstance()
+        # user's LOCALAPPDATA.  It uses a random loopback port and a unique
+        # temporary data directory, so it must remain runnable while the real
+        # UI or daemon owns its stable mutex.
         try:
-            self_test_instance.acquire()
             return _self_test()
         except BaseException:
             return 1
-        finally:
-            self_test_instance.close()
 
     logger, log_path = _configure_logging()
     if argv == ["--stop-daemon"]:
